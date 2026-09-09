@@ -11,14 +11,16 @@ from .actions import BrowserAction
 from .agent import BrowserPromptAgent
 from .environment import BrowserEnvironment
 from .web_ui import HTML
+from self_improvement.autocoder import AutonomousCoder
 
 
 class BrowserGateway:
     """HTTP gateway around a BrowserEnvironment with a prompt-driven web UI."""
-    def __init__(self, environment, max_body=64 * 1024):
+    def __init__(self, environment, max_body=64 * 1024, repo_path="/opt/AGI"):
         self.environment = environment
         self.max_body = int(max_body)
         self.prompt_agent = BrowserPromptAgent(environment)
+        self.autocoder = AutonomousCoder(repo_path=repo_path)
 
     @staticmethod
     def _response_text(observation):
@@ -29,15 +31,23 @@ class BrowserGateway:
         text = str(observation.get("text") or "").strip()
         if len(text) > 4000:
             text = text[:4000] + "..."
-        if text:
-            return f"Page: {title}\nURL: {url}\n\n{text}"
-        return f"Page: {title}\nURL: {url}"
+        return f"Page: {title}\nURL: {url}\n\n{text}" if text else f"Page: {title}\nURL: {url}"
+
+    @staticmethod
+    def _is_self_improvement(prompt):
+        text = prompt.lower()
+        phrases = (
+            "upgrade yourself", "improve yourself", "self improve", "self-improvement",
+            "upgrade your code", "improve your code", "ارتقا", "خودت را ارتقا", "خودشو ارتقا",
+            "کد خودت", "کد خودتو", "خودت را بهتر", "خودشو بهتر",
+        )
+        return any(phrase in text for phrase in phrases)
 
     def handler_class(self):
         gateway = self
 
         class Handler(BaseHTTPRequestHandler):
-            server_version = "AGI-Browser-Gateway/2.0"
+            server_version = "AGI-Browser-Gateway/2.1"
 
             def _json(self, status, payload):
                 data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -78,19 +88,11 @@ class BrowserGateway:
                     if path in ("", "/"):
                         return self._html()
                     if path == "/health":
-                        return self._json(200, {
-                            "ok": True,
-                            "service": "browser-gateway",
-                            "version": "2.0",
-                            "auth": False,
-                            "ui": True,
-                        })
+                        return self._json(200, {"ok": True, "service": "browser-gateway", "version": "2.1", "auth": False, "ui": True, "self_improvement": True})
                     if path in ("/observe", "/api/observe"):
                         return self._json(200, {"ok": True, "observation": gateway.environment.observe()})
                     if path == "/tools":
-                        return self._json(200, {"ok": True, "actions": [
-                            "open", "click", "type", "scroll", "back", "wait", "extract"
-                        ]})
+                        return self._json(200, {"ok": True, "actions": ["open", "click", "type", "scroll", "back", "wait", "extract", "self-improve"]})
                     return self._json(404, {"error": "not found"})
                 except Exception as exc:
                     return self._json(500, {"error": str(exc)})
@@ -104,22 +106,24 @@ class BrowserGateway:
                         if not isinstance(name, str):
                             raise ValueError("action name is required")
                         action = BrowserAction(name, dict(payload.get("args", {})))
-                        return self._json(200, {
-                            "ok": True,
-                            "result": gateway.environment.execute(action),
-                        })
+                        return self._json(200, {"ok": True, "result": gateway.environment.execute(action)})
                     if path == "/api/prompt":
                         prompt = payload.get("prompt")
                         if not isinstance(prompt, str) or not prompt.strip():
                             raise ValueError("prompt is required")
-                        result = gateway.prompt_agent.run(prompt.strip())
+                        prompt = prompt.strip()
+                        if gateway._is_self_improvement(prompt):
+                            result = gateway.autocoder.improve(prompt)
+                            return self._json(200, {
+                                "ok": result.get("ok", False),
+                                "mode": "self-improvement",
+                                "response": result.get("summary", result.get("error", "self-improvement failed")),
+                                "observation": gateway.environment.observe(),
+                                "steps": [{"type": "self-improvement", "result": result}],
+                            })
+                        result = gateway.prompt_agent.run(prompt)
                         observation = result.get("observation", {})
-                        return self._json(200, {
-                            "ok": True,
-                            "response": gateway._response_text(observation),
-                            "steps": result.get("steps", []),
-                            "observation": observation,
-                        })
+                        return self._json(200, {"ok": True, "mode": "browser", "response": gateway._response_text(observation), "steps": result.get("steps", []), "observation": observation})
                     return self._json(404, {"error": "not found"})
                 except (ValueError, TypeError, KeyError) as exc:
                     return self._json(400, {"error": str(exc)})
@@ -143,20 +147,3 @@ class BrowserGateway:
             pass
         finally:
             server.server_close()
-
-
-if __name__ == "__main__":
-    import argparse
-    from .cdp import CDPBackend
-    from .session import BrowserSession
-
-    parser = argparse.ArgumentParser(description="AGI network Browser Gateway")
-    parser.add_argument("--host", default="0.0.0.0")
-    parser.add_argument("--port", type=int, default=8080)
-    parser.add_argument("--cdp-host", default="127.0.0.1")
-    parser.add_argument("--cdp-port", type=int, default=9222)
-    args = parser.parse_args()
-
-    backend = CDPBackend(args.cdp_host, args.cdp_port)
-    environment = BrowserEnvironment(BrowserSession(backend))
-    BrowserGateway(environment).serve(args.host, args.port)
