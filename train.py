@@ -25,12 +25,7 @@ def build_dataset(text, tokenizer, sequence_length):
 
 def save_tokenizer(path, tokenizer):
     """Save tokenizer configuration for reproducible generation."""
-    payload = {
-        "type": "byte",
-        "special_tokens": tokenizer.special_tokens,
-        "byte_offset": tokenizer.byte_offset,
-        "vocabulary_size": tokenizer.vocabulary_size,
-    }
+    payload = tokenizer.to_dict()
     directory = os.path.dirname(path)
     if directory:
         os.makedirs(directory, exist_ok=True)
@@ -61,12 +56,25 @@ def main():
     if args.model_size < 1 or args.model_size % args.heads != 0:
         parser.error("--model-size must be positive and divisible by --heads")
 
-    text = read_text(args.data)
+    try:
+        text = read_text(args.data)
+    except FileNotFoundError:
+        parser.error(
+            f"training corpus not found: {args.data}. "
+            "Create a UTF-8 text file and pass it with --data."
+        )
+    except UnicodeDecodeError:
+        parser.error(f"training corpus is not valid UTF-8: {args.data}")
+
     if not text:
         parser.error("training corpus must not be empty")
 
     tokenizer = ByteTokenizer()
-    dataset = build_dataset(text, tokenizer, args.sequence_length)
+    try:
+        dataset = build_dataset(text, tokenizer, args.sequence_length)
+    except ValueError as error:
+        parser.error(str(error))
+
     model = CausalLanguageModel(
         len(tokenizer),
         model_size=args.model_size,
