@@ -1,5 +1,5 @@
 import unittest
-from cognition.tokenizer import BasicTokenizer
+from cognition.tokenizer import BasicTokenizer, ByteTokenizer
 from cognition.embeddings import Embedding
 from cognition.world_model import WorldState
 from cognition.goals import Goal, GoalManager
@@ -13,6 +13,18 @@ class CognitionTests(unittest.TestCase):
         tokenizer.fit(["hello world", "hello AGI"])
         ids = tokenizer.encode("hello world")
         self.assertEqual(tokenizer.decode(ids), "hello world")
+
+    def test_byte_tokenizer_multilingual_round_trip(self):
+        tokenizer = ByteTokenizer()
+        text = "سلام AGI 🌍"
+        ids = tokenizer.encode(text, add_bos=True, add_eos=True)
+        self.assertEqual(tokenizer.decode(ids), "<BOS>" + text + "<EOS>")
+        self.assertEqual(len(tokenizer), 260)
+
+    def test_byte_tokenizer_is_deterministic(self):
+        tokenizer = ByteTokenizer()
+        self.assertEqual(tokenizer.encode("سلام"), tokenizer.encode("سلام"))
+        self.assertEqual(tokenizer.decode(tokenizer.encode("hello")), "hello")
 
     def test_embedding_shape(self):
         embedding = Embedding(10, 8, seed=7)
