@@ -8,18 +8,28 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
 from .actions import BrowserAction
-from .agent import BrowserPromptAgent
 from .environment import BrowserEnvironment
 from .web_ui import HTML
+from cognition.runtime import CognitiveRuntime
 from self_improvement.autocoder import AutonomousCoder
 
 
 class BrowserGateway:
-    """HTTP gateway around a BrowserEnvironment with a prompt-driven web UI."""
-    def __init__(self, environment, max_body=64 * 1024, repo_path="/opt/AGI"):
+    """HTTP gateway around a browser environment and the cognitive runtime."""
+    def __init__(self, environment, config=None, max_body=64 * 1024,
+                 repo_path="/opt/AGI", model_url=None, model=None,
+                 model_timeout=120, max_steps=8):
         self.environment = environment
+        self.config = config or {}
         self.max_body = int(max_body)
-        self.prompt_agent = BrowserPromptAgent(environment)
+        self.runtime = CognitiveRuntime(
+            environment,
+            config=self.config,
+            model_url=model_url,
+            model=model,
+            timeout=model_timeout,
+            max_steps=max_steps,
+        )
         self.autocoder = AutonomousCoder(repo_path=repo_path)
 
     @staticmethod
@@ -47,7 +57,7 @@ class BrowserGateway:
         gateway = self
 
         class Handler(BaseHTTPRequestHandler):
-            server_version = "AGI-Browser-Gateway/2.1"
+            server_version = "AGI-Browser-Gateway/3.0"
 
             def _json(self, status, payload):
                 data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -88,11 +98,24 @@ class BrowserGateway:
                     if path in ("", "/"):
                         return self._html()
                     if path == "/health":
-                        return self._json(200, {"ok": True, "service": "browser-gateway", "version": "2.1", "auth": False, "ui": True, "self_improvement": True})
+                        return self._json(200, {
+                            "ok": True,
+                            "service": "browser-gateway",
+                            "version": "3.0",
+                            "auth": False,
+                            "ui": True,
+                            "cognitive_runtime": True,
+                            "self_improvement": True,
+                            "model": gateway.runtime.model,
+                            "model_url": gateway.runtime.model_url,
+                        })
                     if path in ("/observe", "/api/observe"):
                         return self._json(200, {"ok": True, "observation": gateway.environment.observe()})
                     if path == "/tools":
-                        return self._json(200, {"ok": True, "actions": ["open", "click", "type", "scroll", "back", "wait", "extract", "self-improve"]})
+                        return self._json(200, {
+                            "ok": True,
+                            "actions": ["open", "click", "type", "scroll", "back", "wait", "extract", "self-improve"],
+                        })
                     return self._json(404, {"error": "not found"})
                 except Exception as exc:
                     return self._json(500, {"error": str(exc)})
@@ -112,23 +135,28 @@ class BrowserGateway:
                         if not isinstance(prompt, str) or not prompt.strip():
                             raise ValueError("prompt is required")
                         prompt = prompt.strip()
+
                         if gateway._is_self_improvement(prompt):
                             result = gateway.autocoder.improve(prompt)
+                            try:
+                                observation = gateway.environment.observe()
+                            except Exception as error:
+                                observation = {"error": str(error)}
                             return self._json(200, {
                                 "ok": result.get("ok", False),
                                 "mode": "self-improvement",
                                 "response": result.get("summary", result.get("error", "self-improvement failed")),
-                                "observation": gateway.environment.observe(),
+                                "observation": observation,
                                 "steps": [{"type": "self-improvement", "result": result}],
                             })
-                        result = gateway.prompt_agent.run(prompt)
-                        observation = result.get("observation", {})
-                        return self._json(200, {"ok": True, "mode": "browser", "response": gateway._response_text(observation), "steps": result.get("steps", []), "observation": observation})
+
+                        result = gateway.runtime.handle(prompt)
+                        return self._json(200, result)
                     return self._json(404, {"error": "not found"})
                 except (ValueError, TypeError, KeyError) as exc:
-                    return self._json(400, {"error": str(exc)})
+                    return self._json(400, {"ok": False, "error": str(exc)})
                 except Exception as exc:
-                    return self._json(500, {"error": str(exc)})
+                    return self._json(500, {"ok": False, "error": str(exc)})
 
             def log_message(self, fmt, *args):
                 return
