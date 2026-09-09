@@ -29,6 +29,22 @@ class Optimizer:
             value = value[0] if value else []
         return tuple(shape)
 
+    @staticmethod
+    def _state_matches_parameter(state, parameter_data):
+        """Validate optimizer state against parameter data, including scalar wrappers."""
+        if isinstance(parameter_data, list):
+            if not isinstance(state, list) or len(state) != len(parameter_data):
+                return False
+            return all(
+                Optimizer._state_matches_parameter(state_item, parameter_item)
+                for state_item, parameter_item in zip(state, parameter_data)
+            )
+        return (
+            isinstance(state, list)
+            and len(state) == 1
+            and not isinstance(state[0], list)
+        )
+
 
 class SGD(Optimizer):
     """Stochastic gradient descent with momentum and weight decay."""
@@ -72,10 +88,12 @@ class SGD(Optimizer):
         if len(values) != len(self.parameters):
             raise ValueError("optimizer parameter count does not match checkpoint")
         for parameter, value in zip(self.parameters, values):
-            if self._shape(value) != parameter.shape:
+            if not self._state_matches_parameter(value, parameter.data):
                 raise ValueError("optimizer state shape does not match model")
             self.velocity[id(parameter)] = value
         self.learning_rate = float(state.get("learning_rate", self.learning_rate))
+        self.momentum = float(state.get("momentum", self.momentum))
+        self.weight_decay = float(state.get("weight_decay", self.weight_decay))
 
 
 class Adam(Optimizer):
@@ -143,12 +161,18 @@ class Adam(Optimizer):
         if len(first) != len(self.parameters) or len(second) != len(self.parameters):
             raise ValueError("optimizer parameter count does not match checkpoint")
         for parameter, first_value, second_value in zip(self.parameters, first, second):
-            if self._shape(first_value) != parameter.shape or self._shape(second_value) != parameter.shape:
+            if not self._state_matches_parameter(first_value, parameter.data):
+                raise ValueError("optimizer state shape does not match model")
+            if not self._state_matches_parameter(second_value, parameter.data):
                 raise ValueError("optimizer state shape does not match model")
             self.first_moment[id(parameter)] = first_value
             self.second_moment[id(parameter)] = second_value
         self.step_count = int(state.get("step_count", 0))
         self.learning_rate = float(state.get("learning_rate", self.learning_rate))
+        self.beta1 = float(state.get("beta1", self.beta1))
+        self.beta2 = float(state.get("beta2", self.beta2))
+        self.eps = float(state.get("eps", self.eps))
+        self.weight_decay = float(state.get("weight_decay", self.weight_decay))
 
 
 class GradientTools:
