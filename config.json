@@ -1,6 +1,6 @@
 {
   "project": "AGI",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "seed": 42,
   "brain": {
     "input_size": 16,
@@ -19,6 +19,13 @@
     "require_human_approval": true,
     "allow_agent_deploy": false,
     "max_candidate_files": 8
+  },
+  "browser": {
+    "enabled": true,
+    "backend": "http",
+    "timeout": 15,
+    "max_steps": 20,
+    "max_response_bytes": 2000000
   },
   "training": {
     "optimizer": "adam",
