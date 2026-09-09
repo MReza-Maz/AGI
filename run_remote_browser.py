@@ -1,4 +1,4 @@
-"""Test and operate a remote Browser Gateway from the AGI host."""
+"""Operate the remote Browser Gateway without authentication."""
 import argparse
 import json
 
@@ -9,16 +9,16 @@ from tools.browser.session import BrowserSession
 
 def main():
     parser = argparse.ArgumentParser(description="AGI remote browser client")
-    parser.add_argument("--gateway", required=True, help="Gateway base URL, for example http://192.168.1.50:8080")
-    parser.add_argument("--token", required=True)
-    parser.add_argument("--url", default=None)
+    parser.add_argument("--gateway", required=True, help="Gateway base URL, for example http://10.42.0.8:8080")
+    parser.add_argument("--url", default=None, help="Open a URL before observing the browser")
     parser.add_argument("--steps", type=int, default=10)
     args = parser.parse_args()
 
-    backend = RemoteBrowserBackend(args.gateway, token=args.token)
+    backend = RemoteBrowserBackend(args.gateway)
     print(json.dumps(backend.health(), ensure_ascii=False, indent=2))
+    session = BrowserSession(backend, max_steps=args.steps)
     if args.url:
-        result = BrowserSession(backend, max_steps=args.steps).execute(BrowserAction.open(args.url))
+        result = session.execute(BrowserAction.open(args.url))
         print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
     else:
         print(json.dumps(backend.observe().to_dict(), ensure_ascii=False, indent=2))
