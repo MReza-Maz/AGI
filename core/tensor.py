@@ -1,4 +1,5 @@
 """Small dependency-free tensor with reverse-mode automatic differentiation."""
+import math
 import random
 
 
@@ -90,7 +91,6 @@ class Tensor:
             return [Tensor._mul_values(a, x) for x in b]
         if not isinstance(b, list):
             return [Tensor._mul_values(x, b) for x in a]
-        # NumPy-style feature broadcasting: [N,M] * [M].
         if isinstance(a[0], list) and not isinstance(b[0], list) and len(a[0]) == len(b):
             return [Tensor._mul_values(row, b) for row in a]
         if not isinstance(a[0], list) and isinstance(b[0], list) and len(a) == len(b[0]):
@@ -117,11 +117,9 @@ class Tensor:
         out = Tensor(self._add_values(self.data, other.data), self.requires_grad or other.requires_grad, (self, other))
         def backward():
             if self.requires_grad:
-                self._accumulate(out.grad)
+                self._accumulate(self._reduce_broadcast(out.grad, self.data) if self.shape != out.shape else out.grad)
             if other.requires_grad:
-                grad = out.grad
-                if other.ndim > 0 and other.shape != out.shape:
-                    grad = self._reduce_broadcast(grad, other.data)
+                grad = self._reduce_broadcast(out.grad, other.data) if other.shape != out.shape else out.grad
                 other._accumulate(grad)
         out._backward = backward
         return out
@@ -147,13 +145,15 @@ class Tensor:
     def _reduce_broadcast(grad, target):
         if not isinstance(target, list):
             return Tensor._sum_values(grad)
-        if len(target) == 1 and isinstance(target[0], list) and isinstance(grad, list):
+        if not isinstance(grad, list):
+            return Tensor._zeros_like(target)
+        if len(target) == 1 and isinstance(target[0], list):
             rows = [Tensor._reduce_broadcast(g, target[0]) for g in grad]
             result = rows[0] if rows else Tensor._zeros_like(target[0])
             for row in rows[1:]:
                 result = Tensor._add_values(result, row)
             return [result]
-        if not isinstance(target[0], list) and isinstance(grad, list) and len(target) == len(grad[0]):
+        if target and not isinstance(target[0], list) and grad and isinstance(grad[0], list) and len(target) == len(grad[0]):
             result = [0.0] * len(target)
             for row in grad:
                 result = Tensor._add_values(result, row)
@@ -168,10 +168,12 @@ class Tensor:
         def backward():
             if self.requires_grad:
                 grad = self._mul_values(out.grad, other.data)
+                if self.shape != out.shape:
+                    grad = self._reduce_broadcast(grad, self.data)
                 self._accumulate(grad)
             if other.requires_grad:
                 grad = self._mul_values(out.grad, self.data)
-                if other.ndim == 0 or other.shape != out.shape:
+                if other.shape != out.shape:
                     grad = self._reduce_broadcast(grad, other.data)
                 other._accumulate(grad)
         out._backward = backward
@@ -203,6 +205,40 @@ class Tensor:
                 self._accumulate(grad(out.grad, values))
         out._backward = backward
         return out
+
+    def _elementwise_unary(self, function, derivative):
+        out = Tensor(
+            [self._unary_apply(function, x) for x in self.data] if isinstance(self.data, list) else function(self.data),
+            self.requires_grad,
+            (self,),
+        )
+        def backward():
+            if self.requires_grad:
+                self._accumulate(self._unary_pair(out.grad, self.data, derivative))
+        out._backward = backward
+        return out
+
+    @staticmethod
+    def _unary_apply(function, value):
+        return [Tensor._unary_apply(function, x) for x in value] if isinstance(value, list) else function(value)
+
+    @staticmethod
+    def _unary_pair(grad, value, derivative):
+        if isinstance(value, list):
+            return [Tensor._unary_pair(g, x, derivative) for g, x in zip(grad, value)]
+        return grad * derivative(value)
+
+    def relu(self):
+        return self._elementwise_unary(lambda x: max(0.0, x), lambda x: 1.0 if x > 0.0 else 0.0)
+
+    def tanh(self):
+        return self._elementwise_unary(math.tanh, lambda x: 1.0 - math.tanh(x) ** 2)
+
+    def exp(self):
+        return self._elementwise_unary(math.exp, math.exp)
+
+    def log(self):
+        return self._elementwise_unary(math.log, lambda x: 1.0 / x)
 
     def __matmul__(self, other):
         if self.ndim != 2 or other.ndim != 2 or self.shape[1] != other.shape[0]:
