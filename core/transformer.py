@@ -15,13 +15,33 @@ class LayerNorm(Module):
     def __call__(self, x):
         if x.ndim != 2:
             raise ValueError("LayerNorm expects a 2D tensor")
-        rows = []
+
+        normalized_rows = []
+        inverses = []
         for row in x.data:
             mean = sum(row) / len(row)
             variance = sum((v - mean) ** 2 for v in row) / len(row)
             inv = 1.0 / math.sqrt(variance + self.eps)
-            rows.append([(v - mean) * inv for v in row])
-        normalized = Tensor(rows, x.requires_grad, (x,))
+            inverses.append(inv)
+            normalized_rows.append([(v - mean) * inv for v in row])
+
+        normalized = Tensor(normalized_rows, x.requires_grad, (x,))
+
+        def backward_normalization():
+            if not x.requires_grad:
+                return
+            feature_count = len(x.data[0])
+            gradient = []
+            for y, upstream, inv in zip(normalized.data, normalized.grad, inverses):
+                mean_grad = sum(upstream) / feature_count
+                mean_grad_y = sum(g * value for g, value in zip(upstream, y)) / feature_count
+                gradient.append([
+                    inv * (g - mean_grad - value * mean_grad_y)
+                    for g, value in zip(upstream, y)
+                ])
+            x._accumulate(gradient)
+
+        normalized._backward = backward_normalization
         return normalized * self.gamma + self.beta
 
 
