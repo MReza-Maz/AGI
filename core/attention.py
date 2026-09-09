@@ -4,12 +4,6 @@ from .tensor import Tensor
 from .nn import Linear, Module
 
 
-def _transpose(matrix):
-    if not matrix:
-        return []
-    return [list(row) for row in zip(*matrix)]
-
-
 def softmax_rows(data):
     result = []
     for row in data:
@@ -33,13 +27,9 @@ class SelfAttention(Module):
         k = self.k(x)
         v = self.v(x)
         scale = 1.0 / math.sqrt(q.shape[-1])
-        scores = (q @ Tensor(_transpose(k.data), requires_grad=False)) * scale
+        scores = (q @ k.transpose()) * scale
 
-        weights = Tensor(
-            softmax_rows(scores.data),
-            scores.requires_grad,
-            (scores,),
-        )
+        weights = Tensor(softmax_rows(scores.data), scores.requires_grad, (scores,))
 
         def backward_softmax():
             if not scores.requires_grad:
