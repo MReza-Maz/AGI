@@ -1,106 +1,7 @@
-"""Dependency-free training engine with gradient clipping and checkpoint support."""
+"""Dependency-free training engine with gradient clipping and checkpoints."""
 import json
 import math
 import os
-
-
-class SGD:
-    """Stochastic gradient descent optimizer with optional momentum and weight decay."""
-    def __init__(self, parameters, learning_rate=0.001, momentum=0.0, weight_decay=0.0):
-        self.parameters = list(parameters)
-        self.learning_rate = float(learning_rate)
-        self.momentum = float(momentum)
-        self.weight_decay = float(weight_decay)
-        self.velocity = {id(parameter): self._zeros_like(parameter.data) for parameter in self.parameters}
-
-    @staticmethod
-    def _zeros_like(value):
-        return [SGD._zeros_like(item) for item in value] if isinstance(value, list) else 0.0
-
-    @staticmethod
-    def _update(value, gradient, velocity, learning_rate, momentum, weight_decay):
-        if isinstance(value, list):
-            for index in range(len(value)):
-                SGD._update(value[index], gradient[index], velocity[index], learning_rate, momentum, weight_decay)
-            return
-        velocity_value = momentum * velocity[0] + gradient + weight_decay * value
-        velocity[0] = velocity_value
-        return
-
-    def step(self):
-        for parameter in self.parameters:
-            if not parameter.requires_grad or parameter.grad is None:
-                continue
-            self._apply(parameter)
-
-    def _apply(self, parameter):
-        def walk(value, gradient, velocity):
-            if isinstance(value, list):
-                for i in range(len(value)):
-                    walk(value[i], gradient[i], velocity[i])
-                return
-            update = self.momentum * velocity[0] + gradient + self.weight_decay * value
-            velocity[0] = update
-            return update
-
-        def apply(value, gradient, velocity):
-            if isinstance(value, list):
-                for i in range(len(value)):
-                    apply(value[i], gradient[i], velocity[i])
-            else:
-                update = self.momentum * velocity[0] + gradient + self.weight_decay * value
-                velocity[0] = update
-                return update
-
-        def commit(value, gradient, velocity):
-            if isinstance(value, list):
-                for i in range(len(value)):
-                    commit(value[i], gradient[i], velocity[i])
-            else:
-                velocity[0] = self.momentum * velocity[0] + gradient + self.weight_decay * value
-                return velocity[0]
-
-        def update_value(value, gradient, velocity):
-            if isinstance(value, list):
-                for i in range(len(value)):
-                    update_value(value[i], gradient[i], velocity[i])
-            else:
-                velocity[0] = self.momentum * velocity[0] + gradient + self.weight_decay * value
-                return velocity[0]
-
-        def subtract(value, velocity):
-            if isinstance(value, list):
-                for i in range(len(value)):
-                    subtract(value[i], velocity[i])
-            else:
-                value -= self.learning_rate * velocity[0]
-                return value
-
-        self._recursive_step(parameter.data, parameter.grad, self.velocity[id(parameter)])
-
-    def _recursive_step(self, value, gradient, velocity):
-        if isinstance(value, list):
-            for i in range(len(value)):
-                self._recursive_step(value[i], gradient[i], velocity[i])
-            return
-        velocity[0] = self.momentum * velocity[0] + gradient + self.weight_decay * value
-        # Scalars are immutable, so this helper is handled by a mutable wrapper below.
-
-        return
-
-    def step(self):
-        for parameter in self.parameters:
-            if not parameter.requires_grad or parameter.grad is None:
-                continue
-            self._step_recursive(parameter.data, parameter.grad, self.velocity[id(parameter)])
-
-    def _step_recursive(self, value, gradient, velocity):
-        if isinstance(value, list):
-            for i in range(len(value)):
-                self._step_recursive(value[i], gradient[i], velocity[i])
-            return
-        velocity[0] = self.momentum * velocity[0] + gradient + self.weight_decay * value
-        return value - self.learning_rate * velocity[0]
 
 
 class Optimizer:
@@ -115,6 +16,50 @@ class Optimizer:
 
     def step(self):
         raise NotImplementedError
+
+
+class SGD(Optimizer):
+    """Stochastic gradient descent with momentum and weight decay."""
+    def __init__(self, parameters, learning_rate=0.001, momentum=0.0, weight_decay=0.0):
+        super().__init__(parameters, learning_rate)
+        self.momentum = float(momentum)
+        self.weight_decay = float(weight_decay)
+        self.velocity = {id(p): self._zeros_like(p.data) for p in self.parameters}
+
+    @staticmethod
+    def _zeros_like(value):
+        return [SGD._zeros_like(item) for item in value] if isinstance(value, list) else 0.0
+
+    def step(self):
+        for parameter in self.parameters:
+            if parameter.grad is None:
+                continue
+            self._update(parameter.data, parameter.grad, self.velocity[id(parameter)])
+
+    def _update(self, value, gradient, velocity):
+        if isinstance(value, list):
+            for i in range(len(value)):
+                self._update(value[i], gradient[i], velocity[i])
+            return
+        velocity[0] = self.momentum * velocity[0] + gradient + self.weight_decay * value
+        # Python floats are immutable; return the updated value to the caller.
+        return value - self.learning_rate * velocity[0]
+
+    def step(self):
+        for parameter in self.parameters:
+            if parameter.grad is None:
+                continue
+            self._update_in_place(parameter, parameter.grad, self.velocity[id(parameter)])
+
+    def _update_in_place(self, parameter, gradient, velocity):
+        def walk(value, grad, state):
+            if isinstance(value, list):
+                for i in range(len(value)):
+                    value[i] = walk(value[i], grad[i], state[i])
+                return value
+            state[0] = self.momentum * state[0] + grad + self.weight_decay * value
+            return value - self.learning_rate * state[0]
+        parameter.data = walk(parameter.data, gradient, velocity)
 
 
 class Adam(Optimizer):
@@ -135,18 +80,16 @@ class Adam(Optimizer):
 
     def step(self):
         self.step_count += 1
-        correction1 = 1.0 - self.beta1 ** self.step_count
-        correction2 = 1.0 - self.beta2 ** self.step_count
+        c1 = 1.0 - self.beta1 ** self.step_count
+        c2 = 1.0 - self.beta2 ** self.step_count
         for parameter in self.parameters:
-            if not parameter.requires_grad or parameter.grad is None:
+            if parameter.grad is None:
                 continue
-            self._update_recursive(parameter.data, parameter.grad, self.m[id(parameter)], self.v[id(parameter)], correction1, correction2)
+            parameter.data = self._update(parameter.data, parameter.grad, self.m[id(parameter)], self.v[id(parameter)], c1, c2)
 
-    def _update_recursive(self, value, gradient, first, second, correction1, correction2):
+    def _update(self, value, gradient, first, second, correction1, correction2):
         if isinstance(value, list):
-            for i in range(len(value)):
-                self._update_recursive(value[i], gradient[i], first[i], second[i], correction1, correction2)
-            return
+            return [self._update(v, g, m, s, correction1, correction2) for v, g, m, s in zip(value, gradient, first, second)]
         first[0] = self.beta1 * first[0] + (1.0 - self.beta1) * gradient
         second[0] = self.beta2 * second[0] + (1.0 - self.beta2) * gradient * gradient
         first_hat = first[0] / correction1
@@ -160,11 +103,8 @@ class GradientTools:
     def global_norm(parameters):
         total = 0.0
         for parameter in parameters:
-            if parameter.grad is None:
-                continue
-            for value in parameter.grad if isinstance(parameter.grad, list) else [parameter.grad]:
-                values = GradientTools._flatten(value)
-                total += sum(item * item for item in values)
+            if parameter.grad is not None:
+                total += sum(x * x for x in GradientTools._flatten(parameter.grad))
         return math.sqrt(total)
 
     @staticmethod
@@ -193,7 +133,7 @@ class GradientTools:
 
 
 class Trainer:
-    """Minimal deterministic training loop for models exposing parameters()."""
+    """Training loop for models exposing parameters() and a callable forward pass."""
     def __init__(self, model, optimizer, loss_fn, clip_norm=None):
         self.model = model
         self.optimizer = optimizer
@@ -217,25 +157,20 @@ class Trainer:
     def fit(self, dataset, epochs=1):
         records = []
         for epoch in range(int(epochs)):
-            epoch_loss = 0.0
+            total = 0.0
             count = 0
             for inputs, targets in dataset:
-                result = self.train_step(inputs, targets)
-                epoch_loss += result["loss"]
+                total += self.train_step(inputs, targets)["loss"]
                 count += 1
-            average = epoch_loss / count if count else 0.0
-            records.append({"epoch": epoch + 1, "loss": average})
+            records.append({"epoch": epoch + 1, "loss": total / count if count else 0.0})
         return records
 
 
 class Checkpoint:
-    """Portable JSON checkpoint for small research models."""
+    """Atomic JSON checkpoint for small research models."""
     @staticmethod
     def save(path, parameters, metadata=None):
-        payload = {
-            "metadata": dict(metadata or {}),
-            "parameters": [parameter.data for parameter in parameters],
-        }
+        payload = {"metadata": dict(metadata or {}), "parameters": [p.data for p in parameters]}
         directory = os.path.dirname(path)
         if directory:
             os.makedirs(directory, exist_ok=True)
