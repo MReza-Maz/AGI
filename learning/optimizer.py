@@ -15,6 +15,20 @@ class Optimizer:
     def step(self):
         raise NotImplementedError
 
+    @staticmethod
+    def _copy_state(value):
+        if isinstance(value, list):
+            return [Optimizer._copy_state(item) for item in value]
+        return float(value)
+
+    @staticmethod
+    def _shape(value):
+        shape = []
+        while isinstance(value, list):
+            shape.append(len(value))
+            value = value[0] if value else []
+        return tuple(shape)
+
 
 class SGD(Optimizer):
     """Stochastic gradient descent with momentum and weight decay."""
@@ -41,6 +55,27 @@ class SGD(Optimizer):
             return [self._update(v, g, m) for v, g, m in zip(value, gradient, velocity)]
         velocity[0] = self.momentum * velocity[0] + gradient + self.weight_decay * value
         return value - self.learning_rate * velocity[0]
+
+    def state_dict(self):
+        return {
+            "type": "sgd",
+            "learning_rate": self.learning_rate,
+            "momentum": self.momentum,
+            "weight_decay": self.weight_decay,
+            "velocity": [self._copy_state(self.velocity[id(p)]) for p in self.parameters],
+        }
+
+    def load_state_dict(self, state):
+        if state.get("type") != "sgd":
+            raise ValueError("optimizer type does not match checkpoint")
+        values = state.get("velocity", [])
+        if len(values) != len(self.parameters):
+            raise ValueError("optimizer parameter count does not match checkpoint")
+        for parameter, value in zip(self.parameters, values):
+            if self._shape(value) != parameter.shape:
+                raise ValueError("optimizer state shape does not match model")
+            self.velocity[id(parameter)] = value
+        self.learning_rate = float(state.get("learning_rate", self.learning_rate))
 
 
 class Adam(Optimizer):
@@ -86,6 +121,34 @@ class Adam(Optimizer):
         v_hat = second[0] / correction2
         update = m_hat / (math.sqrt(v_hat) + self.eps) + self.weight_decay * value
         return value - self.learning_rate * update
+
+    def state_dict(self):
+        return {
+            "type": "adam",
+            "learning_rate": self.learning_rate,
+            "beta1": self.beta1,
+            "beta2": self.beta2,
+            "eps": self.eps,
+            "weight_decay": self.weight_decay,
+            "step_count": self.step_count,
+            "first_moment": [self._copy_state(self.first_moment[id(p)]) for p in self.parameters],
+            "second_moment": [self._copy_state(self.second_moment[id(p)]) for p in self.parameters],
+        }
+
+    def load_state_dict(self, state):
+        if state.get("type") != "adam":
+            raise ValueError("optimizer type does not match checkpoint")
+        first = state.get("first_moment", [])
+        second = state.get("second_moment", [])
+        if len(first) != len(self.parameters) or len(second) != len(self.parameters):
+            raise ValueError("optimizer parameter count does not match checkpoint")
+        for parameter, first_value, second_value in zip(self.parameters, first, second):
+            if self._shape(first_value) != parameter.shape or self._shape(second_value) != parameter.shape:
+                raise ValueError("optimizer state shape does not match model")
+            self.first_moment[id(parameter)] = first_value
+            self.second_moment[id(parameter)] = second_value
+        self.step_count = int(state.get("step_count", 0))
+        self.learning_rate = float(state.get("learning_rate", self.learning_rate))
 
 
 class GradientTools:
