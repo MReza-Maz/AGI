@@ -1,0 +1,9 @@
+{
+  "project": "AGI",
+  "version": "0.2.0",
+  "seed": 42,
+  "brain": {"input_size": 16, "hidden_size": 32, "output_size": 16, "layers": 2},
+  "memory": {"working_capacity": 32, "semantic_path": "data/semantic.json", "episodic_path": "data/episodes.jsonl"},
+  "security": {"require_human_approval": true, "allow_agent_deploy": false, "max_candidate_files": 8},
+  "training": {"learning_rate": 0.001, "epochs": 10}
+}
