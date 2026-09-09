@@ -1,11 +1,5 @@
-"""Small nested-list tensor with reverse-mode automatic differentiation.
-
-The implementation is intentionally dependency-free and designed for research,
-not for replacing mature numerical frameworks.
-"""
-import math
+"""Small dependency-free tensor with reverse-mode automatic differentiation."""
 import random
-from typing import Callable, List, Sequence
 
 
 class Tensor:
@@ -27,11 +21,11 @@ class Tensor:
     @property
     def shape(self):
         x = self.data
-        out = []
+        result = []
         while isinstance(x, list):
-            out.append(len(x))
+            result.append(len(x))
             x = x[0] if x else []
-        return tuple(out)
+        return tuple(result)
 
     @property
     def ndim(self):
@@ -43,9 +37,10 @@ class Tensor:
     def flatten(self):
         def walk(x):
             if isinstance(x, list):
-                r = []
-                for v in x: r.extend(walk(v))
-                return r
+                result = []
+                for value in x:
+                    result.extend(walk(value))
+                return result
             return [x]
         return walk(self.data)
 
@@ -54,48 +49,115 @@ class Tensor:
 
     @classmethod
     def zeros(cls, shape, requires_grad=False):
-        def build(s): return [build(s[1:]) for _ in range(s[0])] if s else 0.0
-        return cls(build(tuple(shape)), requires_grad)
+        shape = tuple(shape)
+        def build(s):
+            return [build(s[1:]) for _ in range(s[0])] if s else 0.0
+        return cls(build(shape), requires_grad)
 
     @classmethod
     def random(cls, shape, scale=0.02, seed=None, requires_grad=False):
         rng = random.Random(seed) if seed is not None else random
+        shape = tuple(shape)
         def build(s):
             return [build(s[1:]) for _ in range(s[0])] if s else rng.uniform(-scale, scale)
-        return cls(build(tuple(shape)), requires_grad)
+        return cls(build(shape), requires_grad)
+
+    @staticmethod
+    def _add_values(a, b):
+        if not isinstance(a, list) and not isinstance(b, list):
+            return a + b
+        if not isinstance(a, list):
+            return [Tensor._add_values(a, x) for x in b]
+        if not isinstance(b, list):
+            return [Tensor._add_values(x, b) for x in a]
+        if len(b) == 1 and len(a) != 1 and isinstance(a[0], list):
+            return [Tensor._add_values(x, b[0]) for x in a]
+        if len(a) != len(b):
+            raise ValueError("incompatible shapes for addition")
+        return [Tensor._add_values(x, y) for x, y in zip(a, b)]
+
+    @staticmethod
+    def _mul_values(a, b):
+        if not isinstance(a, list) and not isinstance(b, list):
+            return a * b
+        if not isinstance(a, list):
+            return [Tensor._mul_values(a, x) for x in b]
+        if not isinstance(b, list):
+            return [Tensor._mul_values(x, b) for x in a]
+        if len(a) != len(b):
+            raise ValueError("incompatible shapes for multiplication")
+        return [Tensor._mul_values(x, y) for x, y in zip(a, b)]
+
+    @staticmethod
+    def _scale(value, scalar):
+        if isinstance(value, list):
+            return [Tensor._scale(x, scalar) for x in value]
+        return value * scalar
 
     def _accumulate(self, value):
-        def add(a, b):
-            if isinstance(a, list): return [add(x, y) for x, y in zip(a, b)]
-            return a + b
-        self.grad = add(self.grad, value)
+        self.grad = self._add_values(self.grad, value)
 
     def __add__(self, other):
         other = other if isinstance(other, Tensor) else Tensor(other)
-        def add(a,b):
-            if isinstance(a,list): return [add(x,y) for x,y in zip(a,b)]
-            return a+b
-        out = Tensor(add(self.data, other.data), self.requires_grad or other.requires_grad, (self,other))
+        out = Tensor(
+            self._add_values(self.data, other.data),
+            self.requires_grad or other.requires_grad,
+            (self, other),
+        )
+
         def backward():
-            if self.requires_grad: self._accumulate(out.grad)
-            if other.requires_grad: other._accumulate(out.grad)
+            if self.requires_grad:
+                self._accumulate(out.grad)
+            if other.requires_grad:
+                grad = out.grad
+                if isinstance(other.data, list) and len(other.data) == 1 and isinstance(grad, list):
+                    grad = [self._sum_values(grad)] if other.shape == (1,) else self._reduce_broadcast(grad, other.data)
+                other._accumulate(grad)
+
         out._backward = backward
         return out
 
     __radd__ = __add__
 
+    @staticmethod
+    def _sum_values(value):
+        if isinstance(value, list):
+            return sum(Tensor._sum_values(x) for x in value)
+        return value
+
+    @staticmethod
+    def _reduce_broadcast(grad, target):
+        if not isinstance(target, list):
+            return Tensor._sum_values(grad)
+        if len(target) == 1 and isinstance(target[0], list) and isinstance(grad, list):
+            rows = [Tensor._reduce_broadcast(g, target[0]) for g in grad]
+            if not rows:
+                return Tensor._zeros_like(target)
+            result = rows[0]
+            for row in rows[1:]:
+                result = Tensor._add_values(result, row)
+            return [result]
+        if len(target) == len(grad):
+            return [Tensor._reduce_broadcast(g, t) for g, t in zip(grad, target)]
+        return Tensor._sum_values(grad)
+
     def __mul__(self, other):
         other = other if isinstance(other, Tensor) else Tensor(other)
-        def mul(a,b):
-            if isinstance(a,list): return [mul(x,y) for x,y in zip(a,b)]
-            return a*b
-        out = Tensor(mul(self.data, other.data), self.requires_grad or other.requires_grad, (self,other))
+        out = Tensor(
+            self._mul_values(self.data, other.data),
+            self.requires_grad or other.requires_grad,
+            (self, other),
+        )
+
         def backward():
-            def scale(g,x):
-                if isinstance(g,list): return [scale(gg,xx) for gg,xx in zip(g,x)]
-                return g*x
-            if self.requires_grad: self._accumulate(scale(out.grad, other.data))
-            if other.requires_grad: other._accumulate(scale(out.grad, self.data))
+            if self.requires_grad:
+                self._accumulate(self._mul_values(out.grad, other.data))
+            if other.requires_grad:
+                grad = self._mul_values(out.grad, self.data)
+                if other.ndim == 0:
+                    grad = self._sum_values(grad)
+                other._accumulate(grad)
+
         out._backward = backward
         return out
 
@@ -104,44 +166,59 @@ class Tensor:
     def __matmul__(self, other):
         if self.ndim != 2 or other.ndim != 2 or self.shape[1] != other.shape[0]:
             raise ValueError("matmul requires compatible 2D tensors")
-        a,b=self.data,other.data
-        result=[[sum(a[i][k]*b[k][j] for k in range(len(b))) for j in range(len(b[0]))] for i in range(len(a))]
-        out=Tensor(result,self.requires_grad or other.requires_grad,(self,other))
+        a, b = self.data, other.data
+        rows, inner, cols = len(a), len(b), len(b[0])
+        result = [[sum(a[i][k] * b[k][j] for k in range(inner)) for j in range(cols)] for i in range(rows)]
+        out = Tensor(result, self.requires_grad or other.requires_grad, (self, other))
+
         def backward():
             if self.requires_grad:
-                g=[[sum(out.grad[i][j]*b[k][j] for j in range(len(b[0]))) for k in range(len(b))] for i in range(len(a))]
-                self._accumulate(g)
+                grad_a = [[sum(out.grad[i][j] * b[k][j] for j in range(cols)) for k in range(inner)] for i in range(rows)]
+                self._accumulate(grad_a)
             if other.requires_grad:
-                g=[[sum(a[i][k]*out.grad[i][j] for i in range(len(a))) for j in range(len(b[0]))] for k in range(len(b))]
-                other._accumulate(g)
-        out._backward=backward
+                grad_b = [[sum(a[i][k] * out.grad[i][j] for i in range(rows)) for j in range(cols)] for k in range(inner)]
+                other._accumulate(grad_b)
+
+        out._backward = backward
         return out
 
     def sum(self):
-        value=sum(self.flatten())
-        out=Tensor(value,self.requires_grad,(self,))
+        out = Tensor(sum(self.flatten()), self.requires_grad, (self,))
+
         def backward():
             if self.requires_grad:
-                def ones(x): return [ones(v) for v in x] if isinstance(x,list) else 1.0
-                self._accumulate(ones(self.data))
-        out._backward=backward
+                self._accumulate(self._scale(self._ones_like(self.data), out.grad))
+
+        out._backward = backward
         return out
+
+    @staticmethod
+    def _ones_like(x):
+        return [Tensor._ones_like(v) for v in x] if isinstance(x, list) else 1.0
 
     def mean(self):
         return self.sum() * (1.0 / self.numel())
 
     def backward(self):
-        if not self.requires_grad: raise RuntimeError("backward requires requires_grad=True")
-        if self.numel() != 1: raise RuntimeError("backward root must be scalar")
+        if not self.requires_grad:
+            raise RuntimeError("backward requires requires_grad=True")
+        if self.numel() != 1:
+            raise RuntimeError("backward root must be scalar")
         self.grad = 1.0
-        topo=[]; seen=set()
-        def visit(t):
-            if id(t) in seen: return
-            seen.add(id(t))
-            for p in t._parents: visit(p)
-            topo.append(t)
+        topology = []
+        seen = set()
+
+        def visit(tensor):
+            if id(tensor) in seen:
+                return
+            seen.add(id(tensor))
+            for parent in tensor._parents:
+                visit(parent)
+            topology.append(tensor)
+
         visit(self)
-        for t in reversed(topo): t._backward()
+        for tensor in reversed(topology):
+            tensor._backward()
 
     def __repr__(self):
         return f"Tensor(shape={self.shape}, requires_grad={self.requires_grad})"
