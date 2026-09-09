@@ -1,8 +1,15 @@
 """Generate text from a trained AGI causal language model checkpoint."""
 import argparse
 import os
+import random
 
 from cognition.inference import InferenceEngine
+
+
+def sample_token(logits, temperature=1.0, top_k=0, seed=None, top_p=1.0):
+    """Backward-compatible sampling helper backed by the inference engine."""
+    rng = random.Random(seed) if seed is not None else None
+    return InferenceEngine.sample_token(logits, temperature, top_k, top_p, rng)
 
 
 def main():
