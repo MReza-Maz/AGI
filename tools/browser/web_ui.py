@@ -1,87 +1,25 @@
-"""Embedded browser UI for entering prompts from another machine."""
+"""Embedded ChatGPT-style web interface for the AGI browser gateway."""
 
 HTML = r'''<!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>AGI Web Agent</title>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AGI</title>
 <style>
-:root { color-scheme: dark; }
-* { box-sizing: border-box; }
-body { margin:0; font-family:system-ui,-apple-system,Segoe UI,sans-serif; background:#0b1020; color:#e8edf7; }
-main { max-width:1100px; margin:0 auto; padding:28px; }
-header { display:flex; justify-content:space-between; align-items:center; gap:16px; margin-bottom:20px; }
-h1 { margin:0; font-size:26px; }
-.badge { padding:6px 10px; border-radius:999px; background:#18233d; font-size:13px; }
-.card { background:#111a2e; border:1px solid #263451; border-radius:14px; padding:18px; margin-bottom:16px; }
-label { display:block; margin-bottom:9px; font-weight:600; }
-textarea { width:100%; min-height:130px; resize:vertical; border:1px solid #334463; border-radius:10px; padding:13px; background:#0a1121; color:#fff; font:inherit; }
-.controls { display:flex; gap:10px; margin-top:12px; }
-button { border:0; border-radius:9px; padding:10px 18px; background:#4f7cff; color:white; font-weight:700; cursor:pointer; }
-button.secondary { background:#253452; }
-button:disabled { opacity:.5; cursor:not-allowed; }
-pre { white-space:pre-wrap; overflow:auto; background:#080d18; border-radius:10px; padding:14px; min-height:120px; }
-#status { color:#9eb3d8; }
-small { color:#91a0bb; }
-</style>
-</head>
-<body>
-<main>
-<header><h1>AGI Web Agent</h1><span id="health" class="badge">checking...</span></header>
-<section class="card">
-<label for="prompt">Prompt</label>
-<textarea id="prompt" autofocus placeholder="Example: برو به https://example.com و صفحه را بررسی کن
-Example: search for Docker architecture"></textarea>
-<div class="controls">
-<button id="run">Execute</button>
-<button id="clear" class="secondary">Clear</button>
+:root{--bg:#212121;--sidebar:#171717;--surface:#2f2f2f;--border:#3d3d3d;--text:#ececec;--muted:#a0a0a0;--accent:#10a37f;--user:#303030;--font:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+*{box-sizing:border-box}html,body{height:100%;margin:0;background:var(--bg);color:var(--text);font-family:var(--font)}button,textarea{font:inherit}button{color:inherit;border:0;cursor:pointer}.app{height:100%;display:flex;overflow:hidden}.sidebar{width:270px;background:var(--sidebar);display:flex;flex-direction:column;padding:12px}.new{height:46px;border:1px solid #444;border-radius:10px;background:transparent;text-align:left;padding:0 14px;font-weight:600}.new:hover{background:#242424}.brand{display:flex;align-items:center;gap:10px;padding:18px 8px 20px;font-size:20px;font-weight:700}.logo{width:28px;height:28px;border-radius:8px;background:var(--accent);display:grid;place-items:center;color:white;font-size:14px}.section{font-size:12px;color:#777;padding:16px 10px 7px}.history{overflow:auto;flex:1}.chat-item{padding:10px;border-radius:8px;color:#c8c8c8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:14px}.chat-item.active,.chat-item:hover{background:#252525}.side-bottom{border-top:1px solid #292929;padding-top:10px}.status{display:flex;align-items:center;gap:8px;padding:10px;font-size:13px;color:var(--muted)}.dot{width:8px;height:8px;border-radius:50%;background:#666}.dot.ok{background:var(--accent);box-shadow:0 0 8px #10a37f66}.main{min-width:0;flex:1;display:flex;flex-direction:column;position:relative}.topbar{height:56px;display:flex;align-items:center;justify-content:space-between;padding:0 22px;border-bottom:1px solid #292929}.model{font-weight:600}.model small{color:var(--muted);font-weight:400;margin-left:7px}.top-actions button{background:transparent;color:var(--muted);padding:8px 10px;border-radius:7px}.top-actions button:hover{background:#303030;color:#fff}.thread{flex:1;overflow:auto}.welcome{max-width:850px;margin:0 auto;padding:80px 24px 160px}.welcome h1{text-align:center;font-size:32px;margin:0 0 12px}.welcome p{text-align:center;color:var(--muted);margin:0 0 34px}.cards{display:grid;grid-template-columns:repeat(2,1fr);gap:12px}.card{background:#2a2a2a;border:1px solid #3a3a3a;border-radius:12px;padding:16px;text-align:left;color:#ddd}.card:hover{background:#323232}.card b{display:block;margin-bottom:6px}.card span{color:#999;font-size:13px}.message{max-width:850px;margin:0 auto;padding:24px;display:flex;gap:14px}.avatar{flex:0 0 32px;width:32px;height:32px;border-radius:50%;display:grid;place-items:center;font-size:12px;font-weight:700}.message.user .avatar{background:#444}.message.assistant .avatar{background:var(--accent)}.content{min-width:0;flex:1;line-height:1.65;white-space:pre-wrap;word-break:break-word}.message.user{background:var(--user)}.message.assistant{background:var(--bg)}.trace{margin-top:14px;border:1px solid #3a3a3a;border-radius:10px;background:#191919}.trace summary{cursor:pointer;padding:9px 12px;color:#999;font-size:12px}.trace pre{padding:0 12px 12px;margin:0;color:#aaa;white-space:pre-wrap;font-size:11px}.composer-wrap{position:absolute;bottom:0;left:0;right:0;padding:18px 24px 22px;background:linear-gradient(transparent,var(--bg) 28%)}.composer{max-width:850px;margin:auto;background:var(--surface);border:1px solid #4a4a4a;border-radius:18px;box-shadow:0 4px 25px #0005;display:flex;align-items:flex-end;padding:9px}.composer:focus-within{border-color:#666}.composer textarea{flex:1;resize:none;max-height:180px;min-height:44px;background:transparent;border:0;outline:0;color:var(--text);padding:11px 10px;line-height:1.45}.composer textarea::placeholder{color:#858585}.send{width:38px;height:38px;border-radius:10px;background:#676767;display:grid;place-items:center;font-size:19px}.send.ready{background:#fff;color:#222}.hint{text-align:center;color:#777;font-size:11px;margin-top:8px}.right{width:300px;background:#191919;border-left:1px solid #2c2c2c;overflow:auto;padding:14px}.panel-title{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:#777;padding:7px 5px 12px}.obs{border:1px solid #333;border-radius:10px;background:#202020;padding:12px;font-size:12px;color:#aaa;white-space:pre-wrap;word-break:break-word;max-height:360px;overflow:auto}.tool{display:flex;justify-content:space-between;padding:9px 5px;border-bottom:1px solid #292929;font-size:13px}.tool span{color:#777}@media(max-width:1000px){.right{display:none}}@media(max-width:700px){.sidebar{display:none}.welcome{padding-top:50px}.cards{grid-template-columns:1fr}.topbar{padding:0 14px}.composer-wrap{padding:14px}.message{padding:18px 14px}}
+</style></head>
+<body><div class="app">
+<aside class="sidebar"><button class="new" id="newChat">＋ New chat</button><div class="brand"><div class="logo">A</div>AGI</div><div class="section">RECENT</div><div class="history" id="history"><div class="chat-item active">New conversation</div></div><div class="side-bottom"><div class="status"><i class="dot" id="dot"></i><span id="status">Connecting...</span></div><div class="chat-item">⚙ Settings</div></div></aside>
+<main class="main"><header class="topbar"><div class="model">AGI <small id="mode">browser agent</small></div><div class="top-actions"><button id="clear">Clear</button><button id="refresh">↻</button></div></header>
+<section class="thread" id="thread"><div class="welcome" id="welcome"><h1>What can I help you build?</h1><p>Your AGI workspace — browse the web, reason, and improve the system.</p><div class="cards"><button class="card" data-prompt="Search the web for the latest developments in autonomous AI agents"><b>Search the web</b><span>Find and summarize current information</span></button><button class="card" data-prompt="Inspect the current project and suggest the most important AGI capability to improve next"><b>Analyze the AGI</b><span>Find the next high-value capability</span></button><button class="card" data-prompt="Open https://www.google.com and search for AGI research"><b>Use the browser</b><span>Navigate a website and inspect it</span></button><button class="card" data-prompt="Upgrade yourself. Inspect memory, reasoning, planning, world model, learning and browser interaction. Implement the highest-value improvements, add tests, run all tests, and commit only if everything passes."><b>Improve yourself</b><span>Let the coding agent upgrade the project</span></button></div></div></section>
+<div class="composer-wrap"><div class="composer"><textarea id="prompt" rows="1" placeholder="Message AGI..."></textarea><button class="send" id="send" title="Send">↑</button></div><div class="hint">AGI can browse the web and modify its code after validation.</div></div></main>
+<aside class="right"><div class="panel-title">Browser observation</div><div class="obs" id="obs">Loading...</div><div class="panel-title">Execution</div><div id="tools"><div class="tool">Browser <span>ready</span></div><div class="tool">Self-improvement <span>enabled</span></div><div class="tool">Authentication <span>off</span></div></div></aside>
 </div>
-<p id="status">Ready.</p>
-</section>
-<section class="card"><h2>Agent response</h2><pre id="response">No task executed yet.</pre></section>
-<section class="card"><h2>Current browser observation</h2><pre id="observation">Loading...</pre></section>
-<section class="card"><h2>Execution trace</h2><pre id="trace">No actions yet.</pre></section>
-</main>
 <script>
-const $ = id => document.getElementById(id);
-async function request(path, options={}) {
-  const response = await fetch(path, options);
-  const data = await response.json();
-  if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
-  return data;
-}
-async function refresh() {
-  try {
-    const data = await request('/api/observe');
-    $('observation').textContent = JSON.stringify(data.observation, null, 2);
-    $('health').textContent = 'online';
-  } catch (error) {
-    $('health').textContent = 'offline';
-    $('status').textContent = error.message;
-  }
-}
-$('run').onclick = async () => {
-  const prompt = $('prompt').value.trim();
-  if (!prompt) return;
-  $('run').disabled = true;
-  $('status').textContent = 'Agent is working...';
-  try {
-    const data = await request('/api/prompt', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({prompt})
-    });
-    $('response').textContent = data.response || 'Task completed.';
-    $('observation').textContent = JSON.stringify(data.observation, null, 2);
-    $('trace').textContent = JSON.stringify(data.steps || [], null, 2);
-    $('status').textContent = `Completed in ${data.steps ? data.steps.length : 0} action(s).`;
-  } catch (error) {
-    $('status').textContent = `Error: ${error.message}`;
-  } finally { $('run').disabled = false; }
-};
-$('clear').onclick = () => { $('prompt').value=''; $('response').textContent='No task executed yet.'; $('trace').textContent='No actions yet.'; };
-refresh();
-</script>
-</body>
-</html>'''
+const $=id=>document.getElementById(id),thread=$("thread"),prompt=$("prompt");function scroll(){thread.scrollTop=thread.scrollHeight}
+function addMessage(role,text,steps){$("welcome")?.remove();const m=document.createElement("div");m.className="message "+role;const av=document.createElement("div");av.className="avatar";av.textContent=role==="user"?"You":"A";const c=document.createElement("div");c.className="content";c.textContent=text||"";if(steps){const d=document.createElement("details");d.className="trace";const s=document.createElement("summary");s.textContent="Execution trace";const pre=document.createElement("pre");pre.textContent=JSON.stringify(steps,null,2);d.append(s,pre);c.appendChild(d)}m.append(av,c);thread.appendChild(m);scroll()}
+async function health(){try{const r=await fetch("/health"),j=await r.json();$("dot").className="dot "+(j.ok?"ok":"");$("status").textContent=j.ok?"Online":"Offline"}catch(e){$("status").textContent="Offline"}}
+async function observe(){try{const r=await fetch("/api/observe"),j=await r.json();$("obs").textContent=JSON.stringify(j.observation||j,null,2)}catch(e){$("obs").textContent="Observation unavailable"}}
+async function send(){const text=prompt.value.trim();if(!text)return;prompt.value="";prompt.style.height="auto";addMessage("user",text);$("send").disabled=true;$("send").textContent="…";try{const r=await fetch("/api/prompt",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({prompt:text})}),j=await r.json();$("mode").textContent=j.mode||"agent";addMessage("assistant",j.response||j.error||"No response",j.steps);if(j.observation)$("obs").textContent=JSON.stringify(j.observation,null,2)}catch(e){addMessage("assistant","Request failed: "+e.message)}finally{$("send").disabled=false;$("send").textContent="↑";observe()}}
+prompt.addEventListener("input",()=>{prompt.style.height="auto";prompt.style.height=Math.min(prompt.scrollHeight,180)+"px";$("send").classList.toggle("ready",!!prompt.value.trim())});prompt.addEventListener("keydown",e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();send()}});$("send").onclick=send;$("refresh").onclick=()=>{health();observe()};$("clear").onclick=()=>{thread.innerHTML='<div class="welcome" id="welcome"><h1>What can I help you build?</h1><p>Your AGI workspace — browse the web, reason, and improve the system.</p></div>'};$("newChat").onclick=$("clear").onclick;document.querySelectorAll("[data-prompt]").forEach(b=>b.onclick=()=>{prompt.value=b.dataset.prompt;prompt.dispatchEvent(new Event("input"));prompt.focus()});health();observe();
+</script></body></html>'''
