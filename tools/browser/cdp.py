@@ -1,6 +1,5 @@
 """Minimal Chrome DevTools Protocol client implemented with Python standard library only."""
 import base64
-import hashlib
 import http.client
 import json
 import os
@@ -20,11 +19,7 @@ class CDPBackend(BrowserBackend):
         self.screenshot_path = screenshot_path
         self.ws = None
         self.message_id = 0
-        self.url = ""
-        self.title = ""
-        self.html = ""
-        self.text = ""
-        self.accessibility = ""
+        self.url = self.title = self.html = self.text = self.accessibility = ""
         self._connect()
 
     def _connect(self):
@@ -47,11 +42,9 @@ class CDPBackend(BrowserBackend):
         path = parsed.path or "/"
         if parsed.query:
             path += "?" + parsed.query
-        request = (
-            f"GET {path} HTTP/1.1\r\nHost: {parsed.hostname}:{parsed.port}\r\n"
-            f"Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {key}\r\n"
-            "Sec-WebSocket-Version: 13\r\n\r\n"
-        )
+        request = (f"GET {path} HTTP/1.1\r\nHost: {parsed.hostname}:{parsed.port}\r\n"
+                   f"Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {key}\r\n"
+                   "Sec-WebSocket-Version: 13\r\n\r\n")
         sock.sendall(request.encode("ascii"))
         header = b""
         while b"\r\n\r\n" not in header:
@@ -72,27 +65,32 @@ class CDPBackend(BrowserBackend):
         else:
             header = struct.pack("!BBQ", 0x81, 0x80 | 127, length)
         mask = os.urandom(4)
-        masked = bytes(value ^ mask[index % 4] for index, value in enumerate(data))
-        self.ws.sendall(header + mask + masked)
+        self.ws.sendall(header + mask + bytes(v ^ mask[i % 4] for i, v in enumerate(data)))
+
+    def _recv_exact(self, size):
+        data = b""
+        while len(data) < size:
+            chunk = self.ws.recv(size - len(data))
+            if not chunk:
+                raise RuntimeError("CDP websocket closed")
+            data += chunk
+        return data
 
     def _recv_frame(self):
-        first, second = self.ws.recv(2)
+        first, second = self._recv_exact(2)
         opcode, length = first & 0x0F, second & 0x7F
         if length == 126:
-            length = struct.unpack("!H", self.ws.recv(2))[0]
+            length = struct.unpack("!H", self._recv_exact(2))[0]
         elif length == 127:
-            length = struct.unpack("!Q", self.ws.recv(8))[0]
-        masked = second & 0x80
-        mask = self.ws.recv(4) if masked else b""
-        payload = b""
-        while len(payload) < length:
-            payload += self.ws.recv(length - len(payload))
-        if masked:
-            payload = bytes(value ^ mask[index % 4] for index, value in enumerate(payload))
+            length = struct.unpack("!Q", self._recv_exact(8))[0]
+        mask = self._recv_exact(4) if second & 0x80 else b""
+        payload = self._recv_exact(length)
+        if mask:
+            payload = bytes(v ^ mask[i % 4] for i, v in enumerate(payload))
         if opcode == 8:
             raise RuntimeError("CDP websocket closed")
         if opcode == 9:
-            self.ws.sendall(bytes([0x8A, len(payload)]) + payload)
+            self._send_frame(payload.decode("utf-8"))
             return self._recv_frame()
         return payload.decode("utf-8")
 
@@ -108,10 +106,9 @@ class CDPBackend(BrowserBackend):
                 raise RuntimeError(message["error"].get("message", "CDP error"))
             return message.get("result", {})
 
-    def _evaluate(self, expression, return_by_value=True):
-        result = self._command("Runtime.evaluate", {"expression": expression, "returnByValue": return_by_value})
-        value = result.get("result", {}).get("result", {}).get("value")
-        return value
+    def _evaluate(self, expression):
+        result = self._command("Runtime.evaluate", {"expression": expression, "returnByValue": True})
+        return result.get("result", {}).get("result", {}).get("value")
 
     def observe(self):
         self.url = self._evaluate("location.href") or self.url
@@ -121,14 +118,12 @@ class CDPBackend(BrowserBackend):
         self.accessibility = self._evaluate("document.body ? document.body.innerText : ''") or ""
         return BrowserObservation(self.url, self.title, self.text, self.html, self.accessibility)
 
-    def _target_script(self, target):
-        escaped = json.dumps(str(target))
-        return f"""(() => {{
-            const q = {escaped};
-            const all = [...document.querySelectorAll('button,a,input,textarea,select,[role],label')];
-            const e = document.querySelector(q) || all.find(x => (x.innerText || x.value || x.getAttribute('aria-label') || x.name || '').trim() === q);
-            if (!e) return false; e.scrollIntoView({{block:'center'}}); e.click(); return true;
-        }})()"""
+    @staticmethod
+    def _find_script(target, selectors):
+        q = json.dumps(str(target))
+        return f"""(() => {{ const q={q}; const all=[...document.querySelectorAll('{selectors}')];
+        const e=document.querySelector(q)||all.find(x=>(x.innerText||x.value||x.getAttribute('aria-label')||x.name||x.placeholder||'').trim()===q);
+        if(!e)return false; e.scrollIntoView({{block:'center'}}); return e; }})()"""
 
     def execute(self, action):
         name, args = action.name, action.args
@@ -136,18 +131,22 @@ class CDPBackend(BrowserBackend):
             self._command("Page.navigate", {"url": args["url"]})
             time.sleep(0.5)
         elif name == "click":
-            if not self._evaluate(self._target_script(args["target"])):
+            target = json.dumps(str(args["target"]))
+            script = f"""(() => {{ const q={target}; const all=[...document.querySelectorAll('button,a,[role],label')]; const e=document.querySelector(q)||all.find(x=>(x.innerText||x.getAttribute('aria-label')||x.name||'').trim()===q); if(!e)return false; e.scrollIntoView({{block:'center'}}); e.click(); return true; }})()"""
+            if not self._evaluate(script):
                 raise ValueError("browser target not found: " + str(args["target"]))
         elif name == "type":
-            target = json.dumps(str(args["target"]))
-            text = json.dumps(str(args["text"]))
-            script = f"""(() => {{ const q={target}; const all=[...document.querySelectorAll('input,textarea,[contenteditable=true]')]; const e=document.querySelector(q)||all.find(x=>(x.name||x.placeholder||x.getAttribute('aria-label')||'')===q); if(!e)return false; e.focus(); e.value={text}; e.dispatchEvent(new Event('input',{{bubbles:true}})); e.dispatchEvent(new Event('change',{{bubbles:true}})); return true; }})()"""
+            target, text = json.dumps(str(args["target"])), json.dumps(str(args["text"]))
+            script = f"""(() => {{ const q={target}, v={text}; const all=[...document.querySelectorAll('input,textarea,[contenteditable=true]')]; const e=document.querySelector(q)||all.find(x=>(x.name||x.placeholder||x.getAttribute('aria-label')||'')===q); if(!e)return false; e.focus(); e.value=v; e.dispatchEvent(new Event('input',{{bubbles:true}})); e.dispatchEvent(new Event('change',{{bubbles:true}})); return true; }})()"""
             if not self._evaluate(script):
                 raise ValueError("input target not found: " + str(args["target"]))
         elif name == "scroll":
             self._evaluate(f"window.scrollBy(0, {int(args.get('amount', 600))})")
         elif name == "back":
-            self._command("Page.navigateToHistoryEntry", {"entryId": 0})
+            history = self._command("Page.getNavigationHistory")
+            entries, index = history.get("entries", []), history.get("currentIndex", 0)
+            if index > 0:
+                self._command("Page.navigateToHistoryEntry", {"entryId": entries[index - 1]["id"]})
         elif name == "wait":
             time.sleep(max(0.0, min(float(args.get("seconds", 1)), 30.0)))
         elif name == "extract":
