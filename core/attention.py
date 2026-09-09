@@ -1,24 +1,54 @@
-"""Minimal self-attention implemented with the standard library."""
+"""Dependency-free scaled dot-product self-attention."""
 import math
 from .tensor import Tensor
 from .nn import Linear, Module
 
 
+def _transpose(matrix):
+    if not matrix:
+        return []
+    return [list(row) for row in zip(*matrix)]
+
+
 def softmax_rows(data):
-    result=[]
+    result = []
     for row in data:
-        m=max(row); ex=[math.exp(v-m) for v in row]; s=sum(ex)
-        result.append([v/s for v in ex])
+        maximum = max(row)
+        exponentials = [math.exp(value - maximum) for value in row]
+        total = sum(exponentials)
+        result.append([value / total for value in exponentials])
     return result
 
 
 class SelfAttention(Module):
+    """Single-head scaled dot-product attention for 2D [sequence, features] input."""
+
     def __init__(self, size, seed=1):
-        self.q=Linear(size,size,seed)
-        self.k=Linear(size,size,seed+1)
-        self.v=Linear(size,size,seed+2)
-    def __call__(self,x):
-        q,k,v=self.q(x),self.k(x),self.v(x)
-        scores=(q @ Tensor([[z for z in row] for row in zip(*k.data)])) * (1.0/math.sqrt(q.shape[-1]))
-        weights=Tensor(softmax_rows(scores.data))
+        self.q = Linear(size, size, seed)
+        self.k = Linear(size, size, seed + 1)
+        self.v = Linear(size, size, seed + 2)
+
+    def __call__(self, x):
+        q = self.q(x)
+        k = self.k(x)
+        v = self.v(x)
+        scale = 1.0 / math.sqrt(q.shape[-1])
+        scores = (q @ Tensor(_transpose(k.data), requires_grad=False)) * scale
+
+        weights = Tensor(
+            softmax_rows(scores.data),
+            scores.requires_grad,
+            (scores,),
+        )
+
+        def backward_softmax():
+            if not scores.requires_grad:
+                return
+            grad_scores = []
+            for row, grad_row in zip(weights.data, weights.grad):
+                dot = sum(g * y for g, y in zip(grad_row, row))
+                grad_scores.append([y * (g - dot) for y, g in zip(row, grad_row)])
+            scores._accumulate(grad_scores)
+
+        weights._backward = backward_softmax
         return weights @ v
