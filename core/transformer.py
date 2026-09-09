@@ -1,7 +1,7 @@
 """Dependency-free transformer components."""
 import math
 from .nn import Linear, MLP, Module
-from .attention import SelfAttention
+from .attention import MultiHeadSelfAttention
 from .tensor import Tensor
 
 
@@ -15,32 +15,26 @@ class LayerNorm(Module):
     def __call__(self, x):
         if x.ndim != 2:
             raise ValueError("LayerNorm expects a 2D tensor")
-
-        normalized_rows = []
-        inverses = []
+        normalized_rows, inverses = [], []
         for row in x.data:
             mean = sum(row) / len(row)
             variance = sum((v - mean) ** 2 for v in row) / len(row)
             inv = 1.0 / math.sqrt(variance + self.eps)
             inverses.append(inv)
             normalized_rows.append([(v - mean) * inv for v in row])
-
         normalized = Tensor(normalized_rows, x.requires_grad, (x,))
 
         def backward_normalization():
             if not x.requires_grad:
                 return
-            feature_count = len(x.data[0])
+            count = len(x.data[0])
             gradient = []
             for y, upstream, inv in zip(normalized.data, normalized.grad, inverses):
-                mean_grad = sum(upstream) / feature_count
-                mean_grad_y = sum(g * value for g, value in zip(upstream, y)) / feature_count
-                gradient.append([
-                    inv * (g - mean_grad - value * mean_grad_y)
-                    for g, value in zip(upstream, y)
-                ])
+                mean_grad = sum(upstream) / count
+                mean_grad_y = sum(g * value for g, value in zip(upstream, y)) / count
+                gradient.append([inv * (g - mean_grad - value * mean_grad_y)
+                                 for g, value in zip(upstream, y)])
             x._accumulate(gradient)
-
         normalized._backward = backward_normalization
         return normalized * self.gamma + self.beta
 
@@ -67,12 +61,12 @@ class PositionalEncoding:
 
 
 class TransformerBlock(Module):
-    """Pre-norm transformer block with residual attention and feed-forward paths."""
-    def __init__(self, size, seed=1, ff_multiplier=4):
+    """Pre-norm transformer block with multi-head causal attention."""
+    def __init__(self, size, seed=1, ff_multiplier=4, heads=4, causal=True):
         self.norm1 = LayerNorm(size)
-        self.attention = SelfAttention(size, seed)
+        self.attention = MultiHeadSelfAttention(size, heads=heads, seed=seed, causal=causal)
         self.norm2 = LayerNorm(size)
-        self.feed_forward = MLP([size, size * ff_multiplier, size], seed + 10)
+        self.feed_forward = MLP([size, size * ff_multiplier, size], seed + 100)
 
     def __call__(self, x):
         x = x + self.attention(self.norm1(x))
@@ -80,9 +74,15 @@ class TransformerBlock(Module):
 
 
 class Transformer(Module):
-    def __init__(self, size, layers=2, positional_encoding=True):
+    """Stacked pre-norm transformer encoder with configurable attention heads."""
+    def __init__(self, size, layers=2, heads=4, positional_encoding=True, causal=True):
+        if size % heads != 0:
+            raise ValueError("size must be divisible by heads")
         self.position = PositionalEncoding(size) if positional_encoding else None
-        self.blocks = [TransformerBlock(size, i + 1) for i in range(layers)]
+        self.blocks = [
+            TransformerBlock(size, i + 1, heads=heads, causal=causal)
+            for i in range(layers)
+        ]
         self.final_norm = LayerNorm(size)
 
     def __call__(self, x):
