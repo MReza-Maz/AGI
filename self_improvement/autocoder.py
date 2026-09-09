@@ -12,7 +12,7 @@ from pathlib import Path
 
 
 class AutonomousCoder:
-    """Read the repository, ask a local coding model for changes, test, and commit."""
+    """Read the repository, ask a local coding model for changes, test, commit, and optionally push."""
 
     PROTECTED_PREFIXES = (
         ".git/",
@@ -21,11 +21,14 @@ class AutonomousCoder:
         "self_improvement/autocoder.py",
     )
 
-    def __init__(self, repo_path="/opt/AGI", model_url=None, model=None, timeout=180):
+    def __init__(self, repo_path="/opt/AGI", model_url=None, model=None, timeout=180, auto_push=None):
         self.repo = Path(repo_path).resolve()
         self.model_url = model_url or os.environ.get("AGI_MODEL_URL", "http://127.0.0.1:11434/api/generate")
         self.model = model or os.environ.get("AGI_MODEL", "qwen2.5-coder:7b")
         self.timeout = int(timeout)
+        if auto_push is None:
+            auto_push = os.environ.get("AGI_AUTO_PUSH", "0").lower() in {"1", "true", "yes", "on"}
+        self.auto_push = bool(auto_push)
 
     def _run(self, *args):
         return subprocess.run(
@@ -73,9 +76,17 @@ Rules:
 Repository snapshot:
 {context}
 """
-        payload = json.dumps({"model": self.model, "prompt": instruction, "stream": False, "format": "json"}).encode()
+        payload = json.dumps({
+            "model": self.model,
+            "prompt": instruction,
+            "stream": False,
+            "format": "json",
+        }).encode()
         request = urllib.request.Request(
-            self.model_url, data=payload, headers={"Content-Type": "application/json"}, method="POST"
+            self.model_url,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
         )
         with urllib.request.urlopen(request, timeout=self.timeout) as response:
             data = json.loads(response.read().decode("utf-8"))
@@ -83,6 +94,20 @@ Repository snapshot:
         if not text:
             raise RuntimeError("coding model returned an empty response")
         return json.loads(text)
+
+    def _rollback(self, changed_paths, before):
+        tracked = [path for path in changed_paths if path in before]
+        created = [path for path in changed_paths if path not in before]
+        if tracked:
+            self._run("git", "restore", "--worktree", "--", *tracked)
+        if created:
+            self._run("git", "clean", "-f", "--", *created)
+
+    def _push(self):
+        result = self._run("git", "push", "origin", "main")
+        if result.returncode:
+            raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "git push failed")
+        return True
 
     def improve(self, prompt):
         if not self.repo.is_dir() or not (self.repo / ".git").exists():
@@ -100,47 +125,57 @@ Repository snapshot:
             return {"ok": False, "stage": "proposal", "error": "model proposed no file changes"}
 
         changed_paths = []
-        for item in changes:
-            relative = str(item.get("path", "")).replace("\\", "/").lstrip("/")
-            content = item.get("content")
-            if not relative or not isinstance(content, str):
-                raise ValueError("invalid model file change")
-            if self._protected(relative) or ".." in Path(relative).parts:
-                raise ValueError(f"protected or invalid path: {relative}")
-            path = self.repo / relative
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(content, encoding="utf-8")
-            changed_paths.append(relative)
+        try:
+            for item in changes:
+                relative = str(item.get("path", "")).replace("\\", "/").lstrip("/")
+                content = item.get("content")
+                if not relative or not isinstance(content, str):
+                    raise ValueError("invalid model file change")
+                if self._protected(relative) or ".." in Path(relative).parts:
+                    raise ValueError(f"protected or invalid path: {relative}")
+                path = self.repo / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content, encoding="utf-8")
+                changed_paths.append(relative)
 
-        syntax = self._run("python3", "-m", "compileall", "-q", ".")
-        tests = self._run("python3", "-m", "unittest", "discover", "-s", "tests", "-v")
-        if syntax.returncode or tests.returncode:
-            self._run("git", "restore", "--worktree", "--", *[p for p in changed_paths if p in before])
-            created = [p for p in changed_paths if p not in before]
-            if created:
-                self._run("git", "clean", "-f", "--", *created)
-            return {
-                "ok": False,
-                "stage": "validation",
-                "error": "validation failed; changes rolled back",
-                "syntax": syntax.stderr or syntax.stdout,
-                "tests": tests.stderr or tests.stdout,
+            syntax = self._run("python3", "-m", "compileall", "-q", ".")
+            tests = self._run("python3", "-m", "unittest", "discover", "-s", "tests", "-v")
+            if syntax.returncode or tests.returncode:
+                self._rollback(changed_paths, before)
+                return {
+                    "ok": False,
+                    "stage": "validation",
+                    "error": "validation failed; changes rolled back",
+                    "syntax": syntax.stderr or syntax.stdout,
+                    "tests": tests.stderr or tests.stdout,
+                    "changed_paths": changed_paths,
+                }
+
+            message = "autonomous improvement: " + str(proposal.get("summary", "update AGI"))[:80]
+            commit = self._run("git", "add", "--", *changed_paths)
+            if commit.returncode:
+                raise RuntimeError(commit.stderr.strip() or "git add failed")
+            commit = self._run("git", "commit", "-m", message)
+            if commit.returncode:
+                raise RuntimeError(commit.stderr.strip() or "git commit failed")
+            revision = self._run("git", "rev-parse", "HEAD")
+            result = {
+                "ok": True,
+                "stage": "committed",
+                "summary": proposal.get("summary", ""),
                 "changed_paths": changed_paths,
+                "commit": revision.stdout.strip(),
+                "tests": "passed",
+                "pushed": False,
             }
-
-        message = "autonomous improvement: " + str(proposal.get("summary", "update AGI"))[:80]
-        commit = self._run("git", "add", "--", *changed_paths)
-        if commit.returncode:
-            raise RuntimeError(commit.stderr.strip() or "git add failed")
-        commit = self._run("git", "commit", "-m", message)
-        if commit.returncode:
-            raise RuntimeError(commit.stderr.strip() or "git commit failed")
-        revision = self._run("git", "rev-parse", "HEAD")
-        return {
-            "ok": True,
-            "stage": "committed",
-            "summary": proposal.get("summary", ""),
-            "changed_paths": changed_paths,
-            "commit": revision.stdout.strip(),
-            "tests": "passed",
-        }
+            if self.auto_push:
+                self._push()
+                result["pushed"] = True
+                result["stage"] = "pushed"
+            return result
+        except Exception:
+            # If an exception occurs before a successful commit, restore the worktree.
+            current = self._run("git", "status", "--porcelain")
+            if current.returncode == 0 and any(line.endswith(tuple(changed_paths)) for line in current.stdout.splitlines()):
+                self._rollback(changed_paths, before)
+            raise
