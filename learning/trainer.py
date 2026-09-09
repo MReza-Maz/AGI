@@ -1,5 +1,6 @@
 """Training orchestration for the dependency-free AGI research stack."""
 import json
+import math
 import os
 from learning.optimizer import GradientTools
 
@@ -33,16 +34,22 @@ class Trainer:
         self.history.append(result)
         return result
 
-    def fit(self, dataset, epochs=1, eval_dataset=None):
+    def fit(self, dataset, epochs=1, eval_dataset=None, start_epoch=0):
         records = []
         items = list(dataset)
         for epoch in range(1, int(epochs) + 1):
             total = 0.0
             for inputs, targets in items:
                 total += self.train_step(inputs, targets)["loss"]
-            record = {"epoch": epoch, "loss": total / max(1, len(items))}
+            record = {
+                "epoch": int(start_epoch) + epoch,
+                "loss": total / max(1, len(items)),
+            }
             if eval_dataset is not None:
                 record["eval_loss"] = self.evaluate(eval_dataset)
+                record["perplexity"] = math.exp(min(record["eval_loss"], 50.0))
+            else:
+                record["perplexity"] = math.exp(min(record["loss"], 50.0))
             records.append(record)
         return records
 
@@ -61,9 +68,11 @@ class Trainer:
 
     def save_checkpoint(self, path, metadata=None):
         payload = {
+            "format": "agi-training-checkpoint-v2",
             "metadata": dict(metadata or {}),
             "step_count": self.step_count,
             "parameters": [p.data for p in self.optimizer.parameters],
+            "optimizer": self.optimizer.state_dict() if hasattr(self.optimizer, "state_dict") else None,
         }
         directory = os.path.dirname(path)
         if directory:
@@ -84,6 +93,9 @@ class Trainer:
             if parameter.shape != self._shape(value):
                 raise ValueError("checkpoint parameter shape does not match model")
             parameter.data = value
+        optimizer_state = payload.get("optimizer")
+        if optimizer_state is not None and hasattr(self.optimizer, "load_state_dict"):
+            self.optimizer.load_state_dict(optimizer_state)
         self.step_count = int(payload.get("step_count", 0))
         return payload.get("metadata", {})
 
