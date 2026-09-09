@@ -99,19 +99,15 @@ class Tensor:
 
     def __add__(self, other):
         other = other if isinstance(other, Tensor) else Tensor(other)
-        out = Tensor(
-            self._add_values(self.data, other.data),
-            self.requires_grad or other.requires_grad,
-            (self, other),
-        )
+        out = Tensor(self._add_values(self.data, other.data), self.requires_grad or other.requires_grad, (self, other))
 
         def backward():
             if self.requires_grad:
                 self._accumulate(out.grad)
             if other.requires_grad:
                 grad = out.grad
-                if isinstance(other.data, list) and len(other.data) == 1 and isinstance(grad, list):
-                    grad = [self._sum_values(grad)] if other.shape == (1,) else self._reduce_broadcast(grad, other.data)
+                if other.ndim > 0 and other.shape != out.shape:
+                    grad = self._reduce_broadcast(grad, other.data)
                 other._accumulate(grad)
 
         out._backward = backward
@@ -131,9 +127,7 @@ class Tensor:
             return Tensor._sum_values(grad)
         if len(target) == 1 and isinstance(target[0], list) and isinstance(grad, list):
             rows = [Tensor._reduce_broadcast(g, target[0]) for g in grad]
-            if not rows:
-                return Tensor._zeros_like(target)
-            result = rows[0]
+            result = rows[0] if rows else Tensor._zeros_like(target[0])
             for row in rows[1:]:
                 result = Tensor._add_values(result, row)
             return [result]
@@ -143,11 +137,7 @@ class Tensor:
 
     def __mul__(self, other):
         other = other if isinstance(other, Tensor) else Tensor(other)
-        out = Tensor(
-            self._mul_values(self.data, other.data),
-            self.requires_grad or other.requires_grad,
-            (self, other),
-        )
+        out = Tensor(self._mul_values(self.data, other.data), self.requires_grad or other.requires_grad, (self, other))
 
         def backward():
             if self.requires_grad:
@@ -178,6 +168,19 @@ class Tensor:
             if other.requires_grad:
                 grad_b = [[sum(a[i][k] * out.grad[i][j] for i in range(rows)) for j in range(cols)] for k in range(inner)]
                 other._accumulate(grad_b)
+
+        out._backward = backward
+        return out
+
+    def transpose(self):
+        """Return a differentiable 2D transpose."""
+        if self.ndim != 2:
+            raise ValueError("transpose currently requires a 2D tensor")
+        out = Tensor([list(row) for row in zip(*self.data)], self.requires_grad, (self,))
+
+        def backward():
+            if self.requires_grad:
+                self._accumulate([list(row) for row in zip(*out.grad)])
 
         out._backward = backward
         return out
