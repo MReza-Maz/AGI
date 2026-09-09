@@ -1,7 +1,7 @@
-"""Integrated cognitive runtime combining memory, goals, reasoning and optional language inference.
+"""Integrated cognitive runtime with memory, reasoning, goals and tool use.
 
 This module is an AGI research architecture, not a claim of artificial general intelligence.
-It deliberately keeps external actions behind explicit application callbacks.
+External side effects remain behind explicit, permission-aware tools.
 """
 import hashlib
 import json
@@ -14,37 +14,32 @@ from cognition.world_model import WorldState
 from memory.manager import MemoryManager
 from reasoning.engine import ReasoningEngine
 from self_improvement.controller import SelfImprovementController
+from tools.registry import ToolRegistry
 
 
 class CognitiveAgent:
-    """Closed-loop research agent: perceive -> recall -> reason -> act -> reflect."""
+    """Closed loop: perceive -> recall -> reason -> tool action -> observe -> reflect."""
 
-    def __init__(self, config=None, inference=None):
+    def __init__(self, config=None, inference=None, tools=None):
         self.config = config or {}
         memory_cfg = self.config.get("memory", {})
         security_cfg = self.config.get("security", {})
         self.memory = MemoryManager(memory_cfg.get("working_capacity", 32))
-        semantic_path = memory_cfg.get("semantic_path", "data/semantic.json")
-        self.memory.semantic.path = semantic_path
+        self.memory.semantic.path = memory_cfg.get("semantic_path", "data/semantic.json")
         self.memory.semantic._load()
         self.reasoning = ReasoningEngine()
         self.goals = GoalManager()
         self.world = WorldState()
-        self.improvement = SelfImprovementController(
-            security_cfg.get("require_human_approval", True)
-        )
+        self.improvement = SelfImprovementController(security_cfg.get("require_human_approval", True))
+        self.tools = tools or ToolRegistry(security_cfg.get("require_human_approval", True))
         self.inference = inference
         self.turn = 0
         self.history = []
 
     @staticmethod
     def _embedding(text, dimensions=32):
-        """Create a deterministic stdlib-only lexical hash embedding."""
         values = [0.0] * dimensions
-        tokens = str(text).lower().split()
-        if not tokens:
-            return values
-        for token in tokens:
+        for token in str(text).lower().split():
             digest = hashlib.sha256(token.encode("utf-8")).digest()
             for offset in range(8):
                 index = digest[offset] % dimensions
@@ -54,11 +49,9 @@ class CognitiveAgent:
         return [value / norm for value in values] if norm else values
 
     def add_goal(self, description, priority=1.0, target=None):
-        goal = Goal(description, float(priority), dict(target or {}))
-        return self.goals.add(goal)
+        return self.goals.add(Goal(description, float(priority), dict(target or {})))
 
     def perceive(self, observation, metadata=None):
-        """Store an observation in working, episodic and semantic memory."""
         vector = self._embedding(observation)
         self.memory.remember(observation, vector, metadata)
         self.world.set("last_observation", observation)
@@ -66,9 +59,7 @@ class CognitiveAgent:
         return vector
 
     def recall(self, query, k=5):
-        """Retrieve semantically similar observations from persistent memory."""
-        vector = self._embedding(query)
-        return self.memory.semantic.search(vector, k=int(k))
+        return self.memory.semantic.search(self._embedding(query), k=int(k))
 
     def _context(self, observation, memories, goal):
         parts = ["Observation: " + str(observation)]
@@ -80,49 +71,39 @@ class CognitiveAgent:
         return "\n".join(parts)
 
     def think(self, observation, k=5):
-        """Run one cognitive cycle without performing external side effects."""
         self.turn += 1
         self.perceive(observation, {"turn": self.turn})
         memories = self.recall(observation, k=k)
         goal = self.goals.next_goal()
-        goal_text = goal.description if goal else observation
-        reasoning = self.reasoning.reason(goal_text, {
-            "observation": observation,
-            "memory_count": len(memories),
-            "turn": self.turn,
+        reasoning = self.reasoning.reason(goal.description if goal else observation, {
+            "observation": observation, "memory_count": len(memories), "turn": self.turn,
         })
-        context = self._context(observation, memories, goal)
-        result = {
-            "turn": self.turn,
-            "observation": observation,
-            "memories": memories,
-            "goal": asdict(goal) if goal else None,
-            "reasoning": reasoning,
-            "context": context,
-        }
+        result = {"turn": self.turn, "observation": observation, "memories": memories,
+                  "goal": asdict(goal) if goal else None, "reasoning": reasoning,
+                  "context": self._context(observation, memories, goal)}
         if self.inference is not None:
             try:
-                result["response"] = self.inference.generate_text(
-                    context,
-                    max_new_tokens=80,
-                    temperature=0.8,
-                    top_k=20,
-                    top_p=0.9,
-                )
+                result["response"] = self.inference.generate_text(result["context"], max_new_tokens=80,
+                    temperature=0.8, top_k=20, top_p=0.9)
             except (ValueError, IndexError, OverflowError) as error:
                 result["response_error"] = str(error)
         self.history.append(result)
         return result
 
+    def execute_tool(self, name, arguments=None, approved=False):
+        """Execute a registered capability through the security boundary."""
+        result = self.tools.execute(name, arguments, approved=approved)
+        self.world.set("last_tool", name)
+        self.world.set("last_tool_result", result)
+        return result
+
     def act(self, result, action_callback=None):
-        """Execute a caller-supplied action only; never execute arbitrary model output."""
         if action_callback is None:
             return {"executed": False, "reason": "no action callback supplied"}
         action = result.get("reasoning", {}).get("plan", [])
         return {"executed": True, "result": action_callback(action, result)}
 
     def reflect(self, result, outcome=None):
-        """Evaluate an observed outcome and update the symbolic world state."""
         if outcome is not None:
             self.world.set("last_outcome", outcome)
         goal = result.get("goal") or {}
@@ -133,16 +114,12 @@ class CognitiveAgent:
         return reflection
 
     def propose_improvements(self, metrics):
-        """Run the guarded improvement pipeline; deployment remains approval-gated."""
         return self.improvement.propose(dict(metrics))
 
     def snapshot(self):
-        return {
-            "turn": self.turn,
-            "world": self.world.snapshot(),
-            "goals": [asdict(goal) for goal in self.goals.goals],
-            "history_size": len(self.history),
-        }
+        return {"turn": self.turn, "world": self.world.snapshot(),
+                "goals": [asdict(goal) for goal in self.goals.goals],
+                "history_size": len(self.history), "tools": self.tools.describe()}
 
     def save_state(self, path="data/agent_state.json"):
         directory = os.path.dirname(path)
