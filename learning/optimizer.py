@@ -26,7 +26,8 @@ class SGD(Optimizer):
 
     @staticmethod
     def _zeros_like(value):
-        return [SGD._zeros_like(x) for x in value] if isinstance(value, list) else 0.0
+        # Keep scalar optimizer state mutable so nested parameter trees work.
+        return [SGD._zeros_like(x) for x in value] if isinstance(value, list) else [0.0]
 
     def step(self):
         for parameter in self.parameters:
@@ -57,7 +58,8 @@ class Adam(Optimizer):
 
     @staticmethod
     def _zeros_like(value):
-        return [Adam._zeros_like(x) for x in value] if isinstance(value, list) else 0.0
+        # Keep scalar optimizer state mutable so nested parameter trees work.
+        return [Adam._zeros_like(x) for x in value] if isinstance(value, list) else [0.0]
 
     def step(self):
         self.step_count += 1
