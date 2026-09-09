@@ -25,7 +25,12 @@ def build_dataset(text, tokenizer, sequence_length):
 
 def save_tokenizer(path, tokenizer):
     """Save tokenizer configuration for reproducible generation."""
-    payload = tokenizer.to_dict()
+    payload = {
+        "type": "byte",
+        "special_tokens": tokenizer.special_tokens,
+        "byte_offset": tokenizer.byte_offset,
+        "vocabulary_size": tokenizer.vocabulary_size,
+    }
     directory = os.path.dirname(path)
     if directory:
         os.makedirs(directory, exist_ok=True)
@@ -53,6 +58,8 @@ def main():
         parser.error("--sequence-length must be positive")
     if args.epochs < 1:
         parser.error("--epochs must be positive")
+    if args.model_size < 1 or args.model_size % args.heads != 0:
+        parser.error("--model-size must be positive and divisible by --heads")
 
     text = read_text(args.data)
     if not text:
