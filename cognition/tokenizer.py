@@ -109,5 +109,28 @@ class ByteTokenizer:
             text_parts.append(bytes(byte_values).decode("utf-8", errors="replace"))
         return "".join(text_parts)
 
+    def to_dict(self):
+        """Serialize tokenizer configuration without serializing learned state."""
+        return {
+            "type": "byte",
+            "special_tokens": list(self.special_tokens),
+            "byte_offset": self.byte_offset,
+            "vocabulary_size": self.vocabulary_size,
+        }
+
+    @classmethod
+    def from_dict(cls, payload):
+        """Restore a byte tokenizer from a serialized configuration."""
+        if not isinstance(payload, dict):
+            raise TypeError("tokenizer configuration must be a dictionary")
+        if payload.get("type") != "byte":
+            raise ValueError("unsupported tokenizer type")
+        tokenizer = cls(payload.get("special_tokens"))
+        if int(payload.get("byte_offset", tokenizer.byte_offset)) != tokenizer.byte_offset:
+            raise ValueError("tokenizer byte offset does not match special tokens")
+        if int(payload.get("vocabulary_size", tokenizer.vocabulary_size)) != tokenizer.vocabulary_size:
+            raise ValueError("tokenizer vocabulary size does not match configuration")
+        return tokenizer
+
     def __len__(self):
         return self.vocabulary_size
