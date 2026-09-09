@@ -10,12 +10,10 @@ import os
 from dataclasses import asdict
 
 from cognition.goals import Goal, GoalManager
-from cognition.inference import InferenceEngine
 from cognition.world_model import WorldState
 from memory.manager import MemoryManager
 from reasoning.engine import ReasoningEngine
 from self_improvement.controller import SelfImprovementController
-from core.tensor import Tensor
 
 
 class CognitiveAgent:
@@ -26,7 +24,9 @@ class CognitiveAgent:
         memory_cfg = self.config.get("memory", {})
         security_cfg = self.config.get("security", {})
         self.memory = MemoryManager(memory_cfg.get("working_capacity", 32))
-        self.memory.semantic.path = memory_cfg.get("semantic_path", "data/semantic.json")
+        semantic_path = memory_cfg.get("semantic_path", "data/semantic.json")
+        self.memory.semantic.path = semantic_path
+        self.memory.semantic._load()
         self.reasoning = ReasoningEngine()
         self.goals = GoalManager()
         self.world = WorldState()
@@ -46,7 +46,7 @@ class CognitiveAgent:
             return values
         for token in tokens:
             digest = hashlib.sha256(token.encode("utf-8")).digest()
-            for offset in range(0, 8):
+            for offset in range(8):
                 index = digest[offset] % dimensions
                 sign = 1.0 if digest[offset + 8] & 1 else -1.0
                 values[index] += sign * (1.0 + digest[offset + 16] / 255.0)
@@ -119,18 +119,15 @@ class CognitiveAgent:
         if action_callback is None:
             return {"executed": False, "reason": "no action callback supplied"}
         action = result.get("reasoning", {}).get("plan", [])
-        return {
-            "executed": True,
-            "result": action_callback(action, result),
-        }
+        return {"executed": True, "result": action_callback(action, result)}
 
     def reflect(self, result, outcome=None):
         """Evaluate an observed outcome and update the symbolic world state."""
         if outcome is not None:
             self.world.set("last_outcome", outcome)
-        reflection = self.reasoning.reflection.evaluate(
-            result.get("goal") or result.get("observation", ""), outcome
-        )
+        goal = result.get("goal") or {}
+        goal_text = goal.get("description", result.get("observation", ""))
+        reflection = self.reasoning.reflection.evaluate(goal_text, outcome)
         self.world.set("last_confidence", reflection.get("confidence", 0.0))
         self.goals.refresh(self.world)
         return reflection
