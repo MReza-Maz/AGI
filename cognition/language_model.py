@@ -18,12 +18,13 @@ class CausalLanguageModel(Module):
         self.max_sequence_length = int(max_sequence_length)
         self.embedding = Embedding(self.vocabulary_size, self.model_size, seed=seed)
         self.position = PositionalEncoding(self.model_size, max_length=self.max_sequence_length)
+        # Positional encoding is applied explicitly here to keep the LM pipeline clear.
         self.transformer = Transformer(
             self.model_size,
             layers=layers,
             heads=heads,
+            positional_encoding=False,
             causal=True,
-            seed=seed + 100,
         )
         self.lm_head = Linear(self.model_size, self.vocabulary_size, seed=seed + 1000)
 
@@ -42,7 +43,7 @@ class CausalLanguageModel(Module):
         return self(token_ids).data[-1]
 
     def generate(self, token_ids, max_new_tokens=20, temperature=1.0):
-        """Greedy/temperature sampling using the standard library only."""
+        """Generate tokens autoregressively using temperature-scaled greedy decoding."""
         if temperature <= 0.0:
             raise ValueError("temperature must be positive")
         result = [int(token_id) for token_id in token_ids]
