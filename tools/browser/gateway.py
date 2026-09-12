@@ -62,7 +62,7 @@ class BrowserGateway:
         gateway = self
 
         class Handler(BaseHTTPRequestHandler):
-            server_version = "AGI-Browser-Gateway/5.0"
+            server_version = "AGI-Browser-Gateway/5.1"
 
             def _json(self, status, payload):
                 data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -72,6 +72,7 @@ class BrowserGateway:
                 self.send_header("Cache-Control", "no-store")
                 self.end_headers()
                 self.wfile.write(data)
+                self.wfile.flush()
 
             def _html(self):
                 data = HTML.encode("utf-8")
@@ -81,6 +82,7 @@ class BrowserGateway:
                 self.send_header("Cache-Control", "no-store")
                 self.end_headers()
                 self.wfile.write(data)
+                self.wfile.flush()
 
             def _body(self):
                 try:
@@ -106,7 +108,7 @@ class BrowserGateway:
                         return self._json(200, {
                             "ok": True,
                             "service": "browser-gateway",
-                            "version": "5.0",
+                            "version": "5.1",
                             "auth": False,
                             "ui": True,
                             "cognitive_runtime": True,
@@ -155,9 +157,7 @@ class BrowserGateway:
                         if gateway._is_self_improvement(prompt):
                             objective = gateway.self_improvement.build_objective(prompt)
                             lifecycle = gateway.evolution.request_upgrade(objective)
-                            if lifecycle.get("accepted"):
-                                gateway.evolution.schedule_shutdown(gateway.server)
-                            return self._json(200, {
+                            response_payload = {
                                 "ok": lifecycle.get("accepted", False),
                                 "mode": "cognitive-self-improvement",
                                 "response": lifecycle.get("message", lifecycle.get("reason", "upgrade rejected")),
@@ -169,7 +169,14 @@ class BrowserGateway:
                                     {"type": "start-upgrader", "status": "started" if lifecycle.get("accepted") else "not-started"},
                                     {"type": "primary-shutdown", "status": "scheduled" if lifecycle.get("accepted") else "not-scheduled"},
                                 ],
-                            })
+                            }
+                            # The HTTP response must be completely written before the
+                            # primary server begins shutting down, otherwise clients can
+                            # observe BrokenPipeError during self-improvement requests.
+                            self._json(200, response_payload)
+                            if lifecycle.get("accepted"):
+                                gateway.evolution.schedule_shutdown(gateway.server, delay=0.5)
+                            return
 
                         result = gateway.runtime.handle(prompt)
                         return self._json(200, result)
