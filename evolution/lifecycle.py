@@ -2,8 +2,8 @@
 
 The primary process stays responsible for serving the user. When the user explicitly
 requests self-improvement, it starts the independent upgrader and exits. The upgrader
-modifies and validates the primary project, starts a fresh primary process only after
-validation succeeds, and then exits itself.
+waits for the primary to stop, modifies and validates the primary project, starts a
+fresh primary process only after validation succeeds, and then exits itself.
 """
 import os
 import subprocess
@@ -38,8 +38,13 @@ class EvolutionLifecycle:
             raise RuntimeError(f"upgrader entry point not found: {upgrader}")
 
         self._upgrade_requested = True
-        command = [sys.executable, str(upgrader), "--repo", str(self.repo), "--primary", self.primary_script,
-                   "--prompt", prompt]
+        command = [
+            sys.executable, str(upgrader),
+            "--repo", str(self.repo),
+            "--primary", self.primary_script,
+            "--wait-pid", str(os.getpid()),
+            "--prompt", prompt,
+        ]
         subprocess.Popen(
             command,
             cwd=self.repo,
