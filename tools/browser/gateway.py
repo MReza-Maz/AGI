@@ -13,6 +13,7 @@ from .environment import BrowserEnvironment
 from .web_ui import HTML
 from cognition.runtime import CognitiveRuntime
 from evolution.lifecycle import EvolutionLifecycle
+from self_improvement.loop import SelfImprovementLoop
 
 
 class BrowserGateway:
@@ -33,6 +34,7 @@ class BrowserGateway:
             max_steps=max_steps,
         )
         self.evolution = EvolutionLifecycle(self.repo_path, "run_browser_gateway.py")
+        self.self_improvement = SelfImprovementLoop(self.runtime.cognitive)
         self.server = None
 
     @staticmethod
@@ -60,7 +62,7 @@ class BrowserGateway:
         gateway = self
 
         class Handler(BaseHTTPRequestHandler):
-            server_version = "AGI-Browser-Gateway/4.0"
+            server_version = "AGI-Browser-Gateway/5.0"
 
             def _json(self, status, payload):
                 data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -104,10 +106,11 @@ class BrowserGateway:
                         return self._json(200, {
                             "ok": True,
                             "service": "browser-gateway",
-                            "version": "4.0",
+                            "version": "5.0",
                             "auth": False,
                             "ui": True,
                             "cognitive_runtime": True,
+                            "self_improvement_analysis": True,
                             "two_process_evolution": True,
                             "model": gateway.runtime.model,
                             "model_url": gateway.runtime.model_url,
@@ -122,6 +125,8 @@ class BrowserGateway:
                             "ok": True,
                             "status": json.loads(status_path.read_text(encoding="utf-8")),
                         })
+                    if path == "/api/self-improvement":
+                        return self._json(200, {"ok": True, "state": gateway.self_improvement.state()})
                     if path == "/tools":
                         return self._json(200, {"ok": True, "actions": [
                             "open", "click", "type", "scroll", "back", "wait", "extract", "self-improve"
@@ -148,14 +153,18 @@ class BrowserGateway:
                         prompt = prompt.strip()
 
                         if gateway._is_self_improvement(prompt):
-                            lifecycle = gateway.evolution.request_upgrade(prompt)
+                            objective = gateway.self_improvement.build_objective(prompt)
+                            lifecycle = gateway.evolution.request_upgrade(objective)
                             if lifecycle.get("accepted"):
                                 gateway.evolution.schedule_shutdown(gateway.server)
                             return self._json(200, {
                                 "ok": lifecycle.get("accepted", False),
-                                "mode": "two-process-evolution",
+                                "mode": "cognitive-self-improvement",
                                 "response": lifecycle.get("message", lifecycle.get("reason", "upgrade rejected")),
+                                "analysis": gateway.self_improvement.last_analysis,
+                                "objective": objective,
                                 "steps": [
+                                    {"type": "self-analysis", "status": "completed"},
                                     {"type": "approval", "status": "accepted" if lifecycle.get("accepted") else "rejected"},
                                     {"type": "start-upgrader", "status": "started" if lifecycle.get("accepted") else "not-started"},
                                     {"type": "primary-shutdown", "status": "scheduled" if lifecycle.get("accepted") else "not-scheduled"},
