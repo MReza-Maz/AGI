@@ -1,6 +1,6 @@
 {
   "project": "AGI",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "seed": 42,
   "brain": {
     "input_size": 16,
@@ -9,6 +9,14 @@
     "layers": 2,
     "attention_heads": 4,
     "causal_attention": true
+  },
+  "llm": {
+    "provider": "ollama",
+    "model": "qwen3:30b",
+    "endpoint": "http://127.0.0.1:11434/api/chat",
+    "timeout": 120,
+    "temperature": 0.2,
+    "structured_reasoning": true
   },
   "memory": {
     "working_capacity": 32,
