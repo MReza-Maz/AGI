@@ -11,6 +11,7 @@ from dataclasses import asdict
 
 from cognition.action_selection import ActionSelector
 from cognition.goals import Goal, GoalManager
+from cognition.hierarchical_planner import HierarchicalPlanner
 from cognition.world_model import WorldState
 from memory.episodic import EpisodicMemory
 from memory.manager import MemoryManager
@@ -37,6 +38,7 @@ class CognitiveAgent:
         self.goals = GoalManager()
         self.world = WorldState()
         self.action_selector = ActionSelector(self.world)
+        self.hierarchical_planner = HierarchicalPlanner(self.reasoning)
         self.improvement = SelfImprovementController(security_cfg.get("require_human_approval", True))
         self.tools = tools or ToolRegistry(security_cfg.get("require_human_approval", True))
         self.inference = inference
@@ -107,7 +109,7 @@ class CognitiveAgent:
         return result
 
     def plan(self, goal, context=None):
-        """Create a fresh plan for a goal without executing any side effect."""
+        """Create a fresh flat reasoning plan for a goal without executing side effects."""
         goal_text = str(goal).strip()
         if not goal_text:
             raise ValueError("goal is required")
@@ -117,6 +119,30 @@ class CognitiveAgent:
         self.world.set("active_plan", plan)
         self.world.set("plan_revision", int(self.world.get("plan_revision", 0)) + 1)
         return {"goal": goal_text, "plan": plan, "revision": self.world.get("plan_revision")}
+
+    def hierarchical_plan(self, goal, subgoals=None, actions_by_subgoal=None):
+        """Create and activate a hierarchical goal plan without executing side effects."""
+        hierarchy = self.hierarchical_planner.plan(goal, subgoals, actions_by_subgoal)
+        self.world.set("active_goal", hierarchy["goal"])
+        self.world.set("active_hierarchical_plan", hierarchy)
+        self.world.set("plan_revision", int(self.world.get("plan_revision", 0)) + 1)
+        return {"goal": hierarchy["goal"], "plan": hierarchy, "revision": self.world.get("plan_revision")}
+
+    def next_planned_action(self):
+        """Return the next action from the active hierarchical plan."""
+        plan = self.world.get("active_hierarchical_plan")
+        return self.hierarchical_planner.next_action(plan) if plan else None
+
+    def complete_planned_action(self, action_name, success=True):
+        """Record a hierarchical action result and advance the active plan."""
+        plan = self.world.get("active_hierarchical_plan")
+        if not plan:
+            return False
+        updated = self.hierarchical_planner.complete_action(plan, action_name, success)
+        if updated:
+            self.world.set("active_hierarchical_plan", plan)
+            self.world.set("last_action_result", {"name": action_name, "success": bool(success)})
+        return updated
 
     def select_action(self, actions, goal=None):
         """Predict and rank structured candidate actions without executing side effects."""
