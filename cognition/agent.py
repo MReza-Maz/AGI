@@ -9,6 +9,7 @@ import math
 import os
 from dataclasses import asdict
 
+from cognition.action_selection import ActionSelector
 from cognition.goals import Goal, GoalManager
 from cognition.world_model import WorldState
 from memory.episodic import EpisodicMemory
@@ -19,7 +20,7 @@ from tools.registry import ToolRegistry
 
 
 class CognitiveAgent:
-    """Closed loop: perceive -> recall -> reason -> act -> observe -> reflect."""
+    """Closed loop: perceive -> recall -> reason -> select -> act -> reflect."""
 
     def __init__(self, config=None, inference=None, tools=None):
         self.config = config or {}
@@ -35,6 +36,7 @@ class CognitiveAgent:
         self.reasoning = ReasoningEngine()
         self.goals = GoalManager()
         self.world = WorldState()
+        self.action_selector = ActionSelector(self.world)
         self.improvement = SelfImprovementController(security_cfg.get("require_human_approval", True))
         self.tools = tools or ToolRegistry(security_cfg.get("require_human_approval", True))
         self.inference = inference
@@ -116,6 +118,17 @@ class CognitiveAgent:
         self.world.set("plan_revision", int(self.world.get("plan_revision", 0)) + 1)
         return {"goal": goal_text, "plan": plan, "revision": self.world.get("plan_revision")}
 
+    def select_action(self, actions, goal=None):
+        """Predict and rank candidate actions without executing side effects."""
+        if goal is None:
+            active = self.goals.next_goal()
+            goal = active.target if active and active.target else None
+        selected = self.action_selector.select(actions, goal)
+        ranked = self.action_selector.rank(actions, goal)
+        self.world.set("last_action_candidates", len(ranked))
+        self.world.set("last_selected_action", selected["action"] if selected else None)
+        return {"selected": selected, "ranked": ranked, "goal": goal}
+
     def execute_tool(self, name, arguments=None, approved=False):
         """Execute a registered capability through the security boundary."""
         result = self.tools.execute(name, arguments, approved=approved)
@@ -126,8 +139,17 @@ class CognitiveAgent:
     def act(self, result, action_callback=None):
         if action_callback is None:
             return {"executed": False, "reason": "no action callback supplied"}
-        action = result.get("reasoning", {}).get("plan", [])
-        return {"executed": True, "result": action_callback(action, result)}
+        actions = result.get("reasoning", {}).get("plan", [])
+        selection = self.select_action(actions, result.get("goal", {}).get("target")) if actions else None
+        chosen = selection.get("selected") if selection else None
+        if chosen is None:
+            return {"executed": False, "reason": "no viable action", "selection": selection}
+        return {
+            "executed": True,
+            "selected_action": chosen["action"],
+            "selection": selection,
+            "result": action_callback(chosen["action"], result),
+        }
 
     def reflect(self, result, outcome=None):
         if outcome is not None:
@@ -137,10 +159,11 @@ class CognitiveAgent:
         reflection = self.reasoning.reflection.evaluate(goal_text, outcome)
         self.world.set("last_confidence", reflection.get("confidence", 0.0))
         self.goals.refresh(self.world)
+        action = result.get("action") or {}
         self.episodic.record(
             goal=goal_text,
             observation=result.get("observation"),
-            action=result.get("reasoning", {}).get("plan"),
+            action=action.get("selected_action", action.get("selection")),
             outcome=outcome,
             reflection=reflection,
             success=reflection.get("confidence", 0.0) >= 0.8,
@@ -149,7 +172,7 @@ class CognitiveAgent:
         return reflection
 
     def run_cycle(self, observation, action_callback=None):
-        """Run one complete perceive -> reason -> act -> reflect cognitive cycle."""
+        """Run one complete perceive -> reason -> select -> act -> reflect cycle."""
         thought = self.think(observation)
         action = self.act(thought, action_callback)
         reflection = self.reflect(thought, action)
