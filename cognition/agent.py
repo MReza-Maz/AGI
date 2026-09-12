@@ -119,7 +119,7 @@ class CognitiveAgent:
         return {"goal": goal_text, "plan": plan, "revision": self.world.get("plan_revision")}
 
     def select_action(self, actions, goal=None):
-        """Predict and rank candidate actions without executing side effects."""
+        """Predict and rank structured candidate actions without executing side effects."""
         if goal is None:
             active = self.goals.next_goal()
             goal = active.target if active and active.target else None
@@ -140,8 +140,15 @@ class CognitiveAgent:
         if action_callback is None:
             return {"executed": False, "reason": "no action callback supplied"}
         actions = result.get("reasoning", {}).get("plan", [])
-        selection = self.select_action(actions, result.get("goal", {}).get("target")) if actions else None
-        chosen = selection.get("selected") if selection else None
+        if not actions:
+            return {"executed": False, "reason": "no actions available"}
+
+        # Keep legacy planner output compatible while structured actions use prediction.
+        if not all(isinstance(action, dict) for action in actions):
+            return {"executed": True, "result": action_callback(actions, result)}
+
+        selection = self.select_action(actions, (result.get("goal") or {}).get("target"))
+        chosen = selection.get("selected")
         if chosen is None:
             return {"executed": False, "reason": "no viable action", "selection": selection}
         return {
