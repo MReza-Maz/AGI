@@ -18,7 +18,7 @@ from tools.registry import ToolRegistry
 
 
 class CognitiveAgent:
-    """Closed loop: perceive -> recall -> reason -> tool action -> observe -> reflect."""
+    """Closed loop: perceive -> recall -> reason -> act -> observe -> reflect."""
 
     def __init__(self, config=None, inference=None, tools=None):
         self.config = config or {}
@@ -90,6 +90,18 @@ class CognitiveAgent:
         self.history.append(result)
         return result
 
+    def plan(self, goal, context=None):
+        """Create a fresh plan for a goal without executing any side effect."""
+        goal_text = str(goal).strip()
+        if not goal_text:
+            raise ValueError("goal is required")
+        result = self.reasoning.reason(goal_text, context or {})
+        plan = list(result.get("plan", []))
+        self.world.set("active_goal", goal_text)
+        self.world.set("active_plan", plan)
+        self.world.set("plan_revision", int(self.world.get("plan_revision", 0)) + 1)
+        return {"goal": goal_text, "plan": plan, "revision": self.world.get("plan_revision")}
+
     def execute_tool(self, name, arguments=None, approved=False):
         """Execute a registered capability through the security boundary."""
         result = self.tools.execute(name, arguments, approved=approved)
@@ -112,6 +124,13 @@ class CognitiveAgent:
         self.world.set("last_confidence", reflection.get("confidence", 0.0))
         self.goals.refresh(self.world)
         return reflection
+
+    def run_cycle(self, observation, action_callback=None):
+        """Run one complete perceive -> reason -> act -> reflect cognitive cycle."""
+        thought = self.think(observation)
+        action = self.act(thought, action_callback)
+        reflection = self.reflect(thought, action)
+        return {"thought": thought, "action": action, "reflection": reflection}
 
     def propose_improvements(self, metrics):
         return self.improvement.propose(dict(metrics))
