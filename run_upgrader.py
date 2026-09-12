@@ -1,6 +1,7 @@
 """Independent upgrader process for the two-process AGI self-evolution loop."""
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -15,10 +16,27 @@ def write_status(repo, payload):
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def wait_for_process_exit(pid, timeout=30):
+    """Wait until the primary process is gone before touching its project files."""
+    if not pid:
+        return
+    deadline = time.time() + float(timeout)
+    while time.time() < deadline:
+        try:
+            os.kill(int(pid), 0)
+        except ProcessLookupError:
+            return
+        except PermissionError:
+            return
+        time.sleep(0.1)
+    raise RuntimeError(f"primary process {pid} did not stop within {timeout} seconds")
+
+
 def main():
     parser = argparse.ArgumentParser(description="AGI independent self-upgrader")
     parser.add_argument("--repo", default="/opt/AGI")
     parser.add_argument("--primary", default="run_browser_gateway.py")
+    parser.add_argument("--wait-pid", type=int, default=0)
     parser.add_argument("--prompt", required=True)
     parser.add_argument("--model-url", default=None)
     parser.add_argument("--model", default=None)
@@ -36,6 +54,10 @@ def main():
     write_status(args.repo, result)
 
     try:
+        wait_for_process_exit(args.wait_pid)
+        result["stage"] = "primary-stopped"
+        write_status(args.repo, result)
+
         coder = AutonomousCoder(
             repo_path=args.repo,
             model_url=args.model_url,
@@ -49,8 +71,9 @@ def main():
         result["finished_at"] = time.time()
         write_status(args.repo, result)
 
-        # The primary was stopped before this process started. Restore service even
-        # when the proposed upgrade failed and the repository was rolled back.
+        # Start the primary only after syntax checks, tests, and commit have succeeded.
+        # On failure, AutonomousCoder rolls the proposed changes back first; restarting
+        # the unchanged primary keeps the service available.
         start_primary(args.repo, args.primary)
         return 0 if result.get("ok") else 2
     except Exception as exc:
