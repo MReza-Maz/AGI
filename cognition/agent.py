@@ -17,6 +17,7 @@ from memory.episodic import EpisodicMemory
 from memory.manager import MemoryManager
 from reasoning.engine import ReasoningEngine
 from self_improvement.controller import SelfImprovementController
+from self_improvement.loop import SelfImprovementLoop
 from tools.registry import ToolRegistry
 
 
@@ -44,6 +45,7 @@ class CognitiveAgent:
         self.inference = inference
         self.turn = 0
         self.history = []
+        self.self_improvement = SelfImprovementLoop(self)
 
     @staticmethod
     def _embedding(text, dimensions=32):
@@ -168,11 +170,8 @@ class CognitiveAgent:
         actions = result.get("reasoning", {}).get("plan", [])
         if not actions:
             return {"executed": False, "reason": "no actions available"}
-
-        # Keep legacy planner output compatible while structured actions use prediction.
         if not all(isinstance(action, dict) for action in actions):
             return {"executed": True, "result": action_callback(actions, result)}
-
         selection = self.select_action(actions, (result.get("goal") or {}).get("target"))
         chosen = selection.get("selected")
         if chosen is None:
@@ -213,6 +212,14 @@ class CognitiveAgent:
 
     def propose_improvements(self, metrics):
         return self.improvement.propose(dict(metrics))
+
+    def self_improve(self, request=None):
+        """Analyze the current agent and perform a controlled code improvement."""
+        return self.self_improvement.improve(request)
+
+    def self_improvement_state(self):
+        """Return the most recent self-improvement diagnosis and result."""
+        return self.self_improvement.state()
 
     def snapshot(self):
         return {"turn": self.turn, "world": self.world.snapshot(),
