@@ -1,4 +1,14 @@
-"""Direct autonomous code-improvement engine using a local HTTP model."""
+"""Safe direct self-improvement engine.
+
+The engine allows the local reasoning model to propose source-code changes,
+applies them directly to the AGI repository, validates the result, and
+automatically rolls back invalid changes.
+
+Git is intentionally not part of the runtime improvement mechanism.
+"""
+
+from __future__ import annotations
+
 import json
 import os
 import shutil
@@ -9,67 +19,114 @@ from pathlib import Path
 
 
 class AutonomousCoder:
-    """Propose, validate, repair, and directly apply project improvements."""
-
-    PROTECTED_PREFIXES = (".git/", ".github/workflows/", "security/", "self_improvement/", "evolution/", "run_upgrader.py")
     MAX_FILES = 8
     MAX_FILE_BYTES = 200_000
     MAX_CONTEXT_BYTES = 900_000
     MAX_REPAIR_ATTEMPTS = 3
 
-    def __init__(self, repo_path="/opt/AGI", model_url=None, model=None, timeout=180, auto_push=None):
+    PROTECTED_PREFIXES = (
+        ".git/",
+        ".github/workflows/",
+        "security/",
+        "self_improvement/",
+        "evolution/",
+        "run_upgrader.py",
+    )
+
+    RUNTIME_PREFIXES = (
+        "checkpoints/",
+        "logs/",
+        "data/evolution_backups/",
+    )
+
+    RUNTIME_FILES = (
+        ".env",
+        ".env.local",
+        ".env.production",
+    )
+
+    def __init__(self, repo_path="/opt/AGI", model="qwen3:4b", ollama_url="http://127.0.0.1:11434/api/generate", timeout=300):
         self.repo = Path(repo_path).resolve()
-        self.model_url = model_url or os.environ.get("AGI_MODEL_URL", "http://127.0.0.1:11434/api/generate")
         self.model = model or os.environ.get("AGI_MODEL", "qwen3:4b")
+        self.ollama_url = ollama_url or os.environ.get("AGI_MODEL_URL", "http://127.0.0.1:11434/api/generate")
         self.timeout = int(timeout)
 
-    def _run(self, *args, timeout=None):
-        return subprocess.run(list(args), cwd=self.repo, text=True, capture_output=True, timeout=timeout or self.timeout)
+        if not self.repo.is_dir():
+            raise RuntimeError(f"Repository does not exist: {self.repo}")
+
+    def _normalize(self, path):
+        path = str(path).replace("\\", "/")
+        while path.startswith("./"):
+            path = path[2:]
+        return path.lstrip("/")
+
+    def _protected(self, path):
+        path = self._normalize(path)
+        if path in self.RUNTIME_FILES:
+            return True
+        for prefix in self.PROTECTED_PREFIXES + self.RUNTIME_PREFIXES:
+            if path == prefix.rstrip("/") or path.startswith(prefix):
+                return True
+        return False
+
+    def _safe_path(self, relative):
+        relative = self._normalize(relative)
+        if not relative or ".." in Path(relative).parts:
+            raise ValueError(f"invalid path: {relative}")
+        if self._protected(relative):
+            raise ValueError(f"protected path cannot be modified: {relative}")
+        path = (self.repo / relative).resolve()
+        try:
+            path.relative_to(self.repo)
+        except ValueError as exc:
+            raise ValueError(f"path escapes repository: {relative}") from exc
+        return path
 
     def _files(self):
-        files = []
+        result = []
         for path in self.repo.rglob("*"):
             if not path.is_file():
                 continue
             relative = path.relative_to(self.repo).as_posix()
             if ".git" in Path(relative).parts or "__pycache__" in Path(relative).parts:
                 continue
-            files.append(relative)
-        return files
+            result.append(path)
+        return sorted(result)
 
     def _snapshot(self):
-        files, total = {}, 0
-        for relative in self._files():
-            if not relative.endswith((".py", ".json", ".md")) or self._protected(relative):
+        snapshot = {}
+        total = 0
+        allowed = {".py", ".json", ".md", ".txt", ".toml", ".yaml", ".yml"}
+        for path in self._files():
+            relative = path.relative_to(self.repo).as_posix()
+            if self._protected(relative) or path.suffix.lower() not in allowed:
                 continue
             try:
-                content = (self.repo / relative).read_text(encoding="utf-8")[:30_000]
-            except (UnicodeDecodeError, OSError):
+                content = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if len(content.encode("utf-8")) > self.MAX_FILE_BYTES:
                 continue
             size = len(content.encode("utf-8"))
             if total + size > self.MAX_CONTEXT_BYTES:
                 break
-            files[relative] = content
+            snapshot[relative] = content
             total += size
-        return files
+        return snapshot
 
-    @classmethod
-    def _protected(cls, path):
-        normalized = str(path).replace("\\", "/")
-        while normalized.startswith("./"):
-            normalized = normalized[2:]
-        normalized = normalized.lstrip("/")
-        for protected in cls.PROTECTED_PREFIXES:
-            if protected.endswith("/"):
-                if normalized == protected[:-1] or normalized.startswith(protected):
-                    return True
-            elif normalized == protected:
-                return True
-        return False
-
-    def _ask_model(self, instruction):
-        payload = json.dumps({"model": self.model, "prompt": instruction, "stream": False, "format": "json"}).encode("utf-8")
-        request = urllib.request.Request(self.model_url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
+    def _ask_model(self, prompt):
+        payload = {
+            "model": self.model,
+            "prompt": prompt,
+            "stream": False,
+            "format": "json",
+        }
+        request = urllib.request.Request(
+            self.ollama_url,
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
         with urllib.request.urlopen(request, timeout=self.timeout) as response:
             data = json.loads(response.read().decode("utf-8"))
         text = data.get("response", data.get("message", {}).get("content", ""))
@@ -83,43 +140,47 @@ class AutonomousCoder:
             raise RuntimeError("coding model returned an invalid proposal")
         return proposal
 
-    def _initial_proposal(self, prompt, files):
-        context = "\n\n".join(f"FILE: {name}\n{content}" for name, content in files.items())
-        return self._ask_model(f'''You are the independent coding engineer inside the AGI project.
-Improve the primary runtime in response to this explicit user request:
-{prompt}
+    def _initial_proposal(self, goal, snapshot):
+        context = "\n\n".join(f"FILE: {name}\n{content}" for name, content in snapshot.items())
+        return self._ask_model(f'''You are the software engineering component of an autonomous AGI.
 
-Return ONLY valid JSON with this exact shape:
-{{"summary":"...","files":[{{"path":"relative/path.py","content":"complete new file content"}}]}}
+User improvement request:
+{goal}
+
+Analyze the repository and propose the smallest coherent implementation that satisfies the request.
+
+Return ONLY valid JSON:
+{{"summary":"short explanation","files":[{{"path":"relative/path.py","content":"complete new file content"}}]}}
 
 Rules:
-- Inspect the repository snapshot before changing anything.
-- Modify only primary-project code, tests, documentation, and configuration needed for the request.
-- Never modify self_improvement/, evolution/, run_upgrader.py, security/, .github/workflows/, or .git/.
 - Return complete file contents, never diffs or markdown fences.
-- Prefer small coherent changes and preserve compatible public APIs.
-- Use Python standard library unless the repository already uses a dependency.
-- Do not add secrets, credentials, malware, persistence, or destructive commands.
+- Preserve existing working functionality and public APIs where possible.
+- Do not modify self_improvement/, evolution/, run_upgrader.py, security/, .github/workflows/, or .git/.
+- Do not modify checkpoints, logs, runtime backups, credentials, or secrets.
+- Do not add external Python dependencies; prefer the standard library.
 - Add or update tests when appropriate.
 
 Repository snapshot:
 {context}
 ''')
 
-    def _repair_proposal(self, prompt, proposal, changed_files, validation_error):
-        context = "\n\n".join(f"FILE: {name}\n{content}" for name, content in changed_files.items())
-        return self._ask_model(f'''You are repairing an AGI code improvement that failed validation.
+    def _repair_proposal(self, goal, proposal, candidate_files, validation_output):
+        context = "\n\n".join(f"FILE: {name}\n{content}" for name, content in candidate_files.items())
+        return self._ask_model(f'''Repair this autonomous AGI code improvement.
+
 Original request:
-{prompt}
+{goal}
+
 Previous summary:
 {proposal.get("summary", "")}
+
 Validation failure:
-{validation_error[-20000:]}
+{validation_output[-20000:]}
 
-Return ONLY valid JSON with this exact shape:
-{{"summary":"...","files":[{{"path":"relative/path.py","content":"complete corrected file content"}}]}}
+Return ONLY valid JSON:
+{{"summary":"repair description","files":[{{"path":"relative/path.py","content":"complete corrected file content"}}]}}
 
-Never modify self_improvement/, evolution/, run_upgrader.py, security/, .github/workflows/, or .git/.
+Never modify self_improvement/, evolution/, run_upgrader.py, security/, .github/workflows/, .git/, checkpoints, logs, runtime backups, credentials, or secrets.
 Use standard-library Python unless the repository already uses a dependency.
 
 Current candidate files:
@@ -127,102 +188,161 @@ Current candidate files:
 ''')
 
     def _backup(self, changed_paths, before_contents):
-        backup_dir = self.repo / "data" / "evolution_backups" / time.strftime("%Y%m%d-%H%M%S")
-        backup_dir.mkdir(parents=True, exist_ok=True)
+        backup_dir = self.repo / "data" / "evolution_backups" / f"{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}-{time.time_ns()}"
+        backup_dir.mkdir(parents=True, exist_ok=False)
+        metadata = []
         for relative in changed_paths:
             if relative in before_contents:
                 target = backup_dir / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(before_contents[relative], encoding="utf-8")
+                metadata.append({"path": relative, "existed": True})
+            else:
+                metadata.append({"path": relative, "existed": False})
+        (backup_dir / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
         return str(backup_dir)
 
     def _rollback(self, changed_paths, before_contents):
         for relative in changed_paths:
-            path = self.repo / relative
+            path = self._safe_path(relative)
             if relative in before_contents:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(before_contents[relative], encoding="utf-8")
             elif path.exists():
-                if path.is_file() or path.is_symlink():
-                    path.unlink()
-                else:
-                    shutil.rmtree(path)
+                path.unlink() if path.is_file() or path.is_symlink() else shutil.rmtree(path)
 
     def restore_backup(self, backup_dir, changed_paths):
         backup = Path(backup_dir)
+        if not backup.is_dir():
+            return {"ok": False, "reason": "backup directory not found"}
+        restored = []
         for relative in changed_paths:
-            source, target = backup / relative, self.repo / relative
+            source = backup / relative
+            target = self._safe_path(relative)
             if source.is_file():
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(source, target)
             elif target.exists():
-                if target.is_file() or target.is_symlink():
-                    target.unlink()
-                else:
-                    shutil.rmtree(target)
+                target.unlink() if target.is_file() or target.is_symlink() else shutil.rmtree(target)
+            restored.append(relative)
+        return {"ok": True, "restored": restored}
 
     def _validate(self):
-        syntax = self._run("python3", "-m", "compileall", "-q", ".")
-        tests = self._run("python3", "-m", "unittest", "discover", "-s", "tests", "-v", timeout=max(self.timeout, 300))
-        output = "\n".join(("SYNTAX:\n" + (syntax.stderr or syntax.stdout), "TESTS:\n" + (tests.stderr or tests.stdout)))
-        return syntax.returncode == 0 and tests.returncode == 0, output
+        compile_process = subprocess.run(
+            ["python3", "-m", "compileall", "-q", "."],
+            cwd=self.repo, capture_output=True, text=True, timeout=180,
+        )
+        compile_output = compile_process.stdout + compile_process.stderr
+        if compile_process.returncode != 0:
+            return {"ok": False, "stage": "compile", "output": compile_output}
 
-    def _validate_paths(self, changes, untracked=None):
-        if not isinstance(changes, list) or not changes:
-            raise ValueError("model proposed no file changes")
-        if len(changes) > self.MAX_FILES:
-            raise ValueError(f"proposal exceeds {self.MAX_FILES} files")
-        untracked = set(untracked or ())
-        normalized, seen = [], set()
-        for item in changes:
+        test_process = subprocess.run(
+            ["python3", "-m", "unittest", "discover", "-s", "tests", "-v"],
+            cwd=self.repo, capture_output=True, text=True, timeout=600,
+        )
+        return {
+            "ok": test_process.returncode == 0,
+            "stage": "tests",
+            "output": test_process.stdout + test_process.stderr,
+        }
+
+    def _validate_paths(self, proposal):
+        files = proposal.get("files") if isinstance(proposal, dict) else None
+        if not isinstance(files, list) or not files:
+            raise ValueError("proposal contains no file changes")
+        if len(files) > self.MAX_FILES:
+            raise ValueError(f"too many files: {len(files)} > {self.MAX_FILES}")
+
+        normalized = []
+        seen = set()
+        for item in files:
             if not isinstance(item, dict):
-                raise ValueError("invalid model file change")
-            relative = str(item.get("path", "")).replace("\\", "/").lstrip("/")
+                raise ValueError("file entry must be an object")
+            relative = self._normalize(item.get("path", ""))
             content = item.get("content")
             if not relative or not isinstance(content, str):
                 raise ValueError("invalid model file change")
+            if relative in seen:
+                raise ValueError(f"duplicate file: {relative}")
             if self._protected(relative) or ".." in Path(relative).parts:
                 raise ValueError(f"protected or invalid path: {relative}")
-            if relative in seen:
-                raise ValueError(f"duplicate file in proposal: {relative}")
             if len(content.encode("utf-8")) > self.MAX_FILE_BYTES:
                 raise ValueError(f"file too large: {relative}")
-            if relative in untracked:
-                raise ValueError(f"proposal would overwrite untracked file: {relative}")
+            self._safe_path(relative)
             seen.add(relative)
             normalized.append((relative, content))
         return normalized
 
-    def improve(self, prompt):
-        if not self.repo.is_dir():
-            raise RuntimeError(f"AGI repository not found: {self.repo}")
+    def improve(self, goal):
+        goal = str(goal).strip()
+        if not goal:
+            raise ValueError("improvement goal is required")
+
         before_contents = {}
-        for relative in self._files():
+        for path in self._files():
+            relative = path.relative_to(self.repo).as_posix()
             if self._protected(relative):
                 continue
-            path = self.repo / relative
             try:
                 before_contents[relative] = path.read_text(encoding="utf-8")
             except (UnicodeDecodeError, OSError):
-                pass
-        proposal = self._initial_proposal(prompt, self._snapshot())
-        changed_paths, backup_dir = [], None
+                continue
+
+        proposal = self._initial_proposal(goal, self._snapshot())
+        last_error = None
+
         for attempt in range(self.MAX_REPAIR_ATTEMPTS + 1):
+            changed_paths = []
+            backup_dir = None
             try:
-                normalized = self._validate_paths(proposal.get("files", []))
-                changed_paths = [path for path, _ in normalized]
+                normalized = self._validate_paths(proposal)
+                changed_paths = [relative for relative, _ in normalized]
                 backup_dir = self._backup(changed_paths, before_contents)
+
                 for relative, content in normalized:
-                    path = self.repo / relative
+                    path = self._safe_path(relative)
                     path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_text(content, encoding="utf-8")
-                valid, validation_output = self._validate()
-                if valid:
-                    return {"ok": True, "stage": "applied", "summary": proposal.get("summary", ""), "changed_paths": changed_paths, "tests": "passed", "repair_attempts": attempt, "backup": backup_dir, "git": False}
+                    temporary = path.with_name(f".{path.name}.evolution.tmp")
+                    temporary.write_text(content, encoding="utf-8")
+                    os.replace(temporary, path)
+
+                validation = self._validate()
+                if validation["ok"]:
+                    return {
+                        "ok": True,
+                        "stage": "applied",
+                        "attempt": attempt + 1,
+                        "summary": proposal.get("summary", ""),
+                        "changed_paths": changed_paths,
+                        "backup": backup_dir,
+                        "tests": "passed",
+                        "git": False,
+                    }
+
+                last_error = validation
                 self._rollback(changed_paths, before_contents)
                 if attempt >= self.MAX_REPAIR_ATTEMPTS:
-                    return {"ok": False, "stage": "validation", "error": "validation failed after repair attempts; changes rolled back", "attempts": attempt + 1, "validation": validation_output[-20000:], "changed_paths": changed_paths, "backup": backup_dir, "git": False}
-                proposal = self._repair_proposal(prompt, proposal, {relative: content for relative, content in normalized}, validation_output)
-            except Exception:
-                self._rollback(changed_paths, before_contents)
-                raise
+                    return {
+                        "ok": False,
+                        "stage": "rolled_back",
+                        "attempts": attempt + 1,
+                        "error": "validation failed after repair attempts",
+                        "validation": validation["output"][-20000:],
+                        "changed_paths": changed_paths,
+                        "backup": backup_dir,
+                        "git": False,
+                    }
+
+                proposal = self._repair_proposal(
+                    goal,
+                    proposal,
+                    {relative: content for relative, content in normalized},
+                    validation["output"],
+                )
+
+            except Exception as exc:
+                if changed_paths:
+                    self._rollback(changed_paths, before_contents)
+                raise RuntimeError(f"self-improvement failed: {exc}") from exc
+
+        return {"ok": False, "stage": "rolled_back", "error": last_error, "git": False}
