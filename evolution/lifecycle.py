@@ -1,10 +1,4 @@
-"""Two-process lifecycle for safe self-evolution.
-
-The primary process stays responsible for serving the user. When the user explicitly
-requests self-improvement, it starts the independent upgrader and exits. The upgrader
-waits for the primary to stop, modifies and validates the primary project, starts a
-fresh primary process only after validation succeeds, and then exits itself.
-"""
+"""Two-process lifecycle for safe direct self-evolution."""
 import os
 import subprocess
 import sys
@@ -13,7 +7,7 @@ from pathlib import Path
 
 
 class EvolutionLifecycle:
-    """Coordinate the primary process and the independent upgrader process."""
+    """Coordinate the primary process and an independent upgrader process."""
 
     def __init__(self, repo_path="/opt/AGI", primary_script="run_browser_gateway.py"):
         self.repo = Path(repo_path).resolve()
@@ -28,37 +22,16 @@ class EvolutionLifecycle:
         """Start the upgrader and schedule shutdown of the current primary process."""
         if self._upgrade_requested:
             return {"accepted": False, "reason": "upgrade already in progress"}
-
         prompt = str(prompt).strip()
         if not prompt:
             raise ValueError("upgrade prompt is required")
-
         upgrader = self.repo / "run_upgrader.py"
         if not upgrader.is_file():
             raise RuntimeError(f"upgrader entry point not found: {upgrader}")
-
         self._upgrade_requested = True
-        command = [
-            sys.executable, str(upgrader),
-            "--repo", str(self.repo),
-            "--primary", self.primary_script,
-            "--wait-pid", str(os.getpid()),
-            "--prompt", prompt,
-        ]
-        subprocess.Popen(
-            command,
-            cwd=self.repo,
-            stdin=subprocess.DEVNULL,
-            stdout=None,
-            stderr=None,
-            start_new_session=True,
-            close_fds=True,
-        )
-        return {
-            "accepted": True,
-            "mode": "two-process-evolution",
-            "message": "Upgrade process started. The primary process will shut down now.",
-        }
+        command = [sys.executable, str(upgrader), "--repo", str(self.repo), "--primary", self.primary_script, "--wait-pid", str(os.getpid()), "--prompt", prompt]
+        subprocess.Popen(command, cwd=self.repo, stdin=subprocess.DEVNULL, stdout=None, stderr=None, start_new_session=True, close_fds=True)
+        return {"accepted": True, "mode": "two-process-evolution", "message": "Upgrade process started. The primary process will shut down now."}
 
     def schedule_shutdown(self, server, delay=0.15):
         """Stop the HTTP server from a background thread after the current response."""
@@ -66,23 +39,14 @@ class EvolutionLifecycle:
             import time
             time.sleep(float(delay))
             server.shutdown()
-
         threading.Thread(target=stop, daemon=True).start()
 
 
 def start_primary(repo_path, primary_script, arguments=None):
-    """Start a new primary process and return immediately."""
+    """Start a new primary process and return its Popen object."""
     repo = Path(repo_path).resolve()
     script = repo / primary_script
     if not script.is_file():
         raise RuntimeError(f"primary entry point not found: {script}")
     args = list(arguments or [])
-    subprocess.Popen(
-        [sys.executable, str(script), *args],
-        cwd=repo,
-        stdin=subprocess.DEVNULL,
-        stdout=None,
-        stderr=None,
-        start_new_session=True,
-        close_fds=True,
-    )
+    return subprocess.Popen([sys.executable, str(script), *args], cwd=repo, stdin=subprocess.DEVNULL, stdout=None, stderr=None, start_new_session=True, close_fds=True)
