@@ -1,8 +1,8 @@
 """Guarded autonomous code-improvement engine using a local HTTP model.
 
 The model proposes repository changes. This module applies them only after
-syntax checks and the project's unit tests pass. Security and execution-boundary
-code is protected from automatic modification.
+syntax checks and the project's unit tests pass. Evolution lifecycle code is
+protected because it must remain independent from the code it upgrades.
 """
 import json
 import os
@@ -12,13 +12,15 @@ from pathlib import Path
 
 
 class AutonomousCoder:
-    """Read the repository, ask a local coding model for changes, test, commit, and optionally push."""
+    """Read the repository, propose changes, validate them, commit, and optionally push."""
 
     PROTECTED_PREFIXES = (
         ".git/",
         ".github/workflows/",
         "security/",
         "self_improvement/autocoder.py",
+        "evolution/",
+        "run_upgrader.py",
     )
 
     def __init__(self, repo_path="/opt/AGI", model_url=None, model=None, timeout=180, auto_push=None):
@@ -44,7 +46,7 @@ class AutonomousCoder:
     def _snapshot(self):
         files = {}
         for relative in self._files():
-            if relative.endswith((".py", ".json", ".md")):
+            if relative.endswith((".py", ".json", ".md")) and not self._protected(relative):
                 path = self.repo / relative
                 if path.is_file():
                     files[relative] = path.read_text(encoding="utf-8")[:30000]
@@ -57,20 +59,23 @@ class AutonomousCoder:
 
     def _ask_model(self, prompt, files):
         context = "\n\n".join(f"FILE: {name}\n{content}" for name, content in files.items())
-        instruction = f"""You are the coding engineer inside the AGI project.
-Improve the project in response to this user request:
+        instruction = f"""You are the independent coding engineer inside the AGI project.
+The primary runtime has stopped and handed control to you.
+Improve the primary runtime in response to this explicit user request:
 {prompt}
 
 Return ONLY valid JSON with this exact shape:
 {{"summary":"...","files":[{{"path":"relative/path.py","content":"complete new file content"}}]}}
 
 Rules:
+- You are the upgrader, not the primary runtime. The primary runtime will be started after validation.
+- Inspect the supplied repository snapshot before making changes.
+- Modify only primary-project code, tests, documentation, and configuration needed for the requested improvement.
+- Never modify evolution/, run_upgrader.py, security/, .github/workflows/, .git/, or self_improvement/autocoder.py.
 - Return complete file contents, never diffs or markdown fences.
-- Prefer small, coherent changes.
+- Prefer small, coherent changes and preserve compatible public APIs.
 - Use Python standard library only unless the repository already uses a dependency.
-- Do not modify security/, .github/workflows/, .git/, or self_improvement/autocoder.py.
 - Do not add secrets, credentials, malware, persistence, or destructive system commands.
-- Preserve public APIs unless the request requires a compatible extension.
 - Add or update tests when appropriate.
 
 Repository snapshot:
@@ -174,7 +179,6 @@ Repository snapshot:
                 result["stage"] = "pushed"
             return result
         except Exception:
-            # If an exception occurs before a successful commit, restore the worktree.
             current = self._run("git", "status", "--porcelain")
             if current.returncode == 0 and any(line.endswith(tuple(changed_paths)) for line in current.stdout.splitlines()):
                 self._rollback(changed_paths, before)
