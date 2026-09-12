@@ -115,12 +115,7 @@ class AutonomousCoder:
         return snapshot
 
     def _ask_model(self, prompt):
-        payload = {
-            "model": self.model,
-            "prompt": prompt,
-            "stream": False,
-            "format": "json",
-        }
+        payload = {"model": self.model, "prompt": prompt, "stream": False, "format": "json"}
         request = urllib.request.Request(
             self.ollama_url,
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -228,46 +223,36 @@ Current candidate files:
         return {"ok": True, "restored": restored}
 
     def _validate(self):
-        compile_process = subprocess.run(
-            ["python3", "-m", "compileall", "-q", "."],
-            cwd=self.repo, capture_output=True, text=True, timeout=180,
-        )
+        compile_process = subprocess.run(["python3", "-m", "compileall", "-q", "."], cwd=self.repo, capture_output=True, text=True, timeout=180)
         compile_output = compile_process.stdout + compile_process.stderr
         if compile_process.returncode != 0:
             return {"ok": False, "stage": "compile", "output": compile_output}
+        test_process = subprocess.run(["python3", "-m", "unittest", "discover", "-s", "tests", "-v"], cwd=self.repo, capture_output=True, text=True, timeout=600)
+        return {"ok": test_process.returncode == 0, "stage": "tests", "output": test_process.stdout + test_process.stderr}
 
-        test_process = subprocess.run(
-            ["python3", "-m", "unittest", "discover", "-s", "tests", "-v"],
-            cwd=self.repo, capture_output=True, text=True, timeout=600,
-        )
-        return {
-            "ok": test_process.returncode == 0,
-            "stage": "tests",
-            "output": test_process.stdout + test_process.stderr,
-        }
-
-    def _validate_paths(self, proposal):
-        files = proposal.get("files") if isinstance(proposal, dict) else None
-        if not isinstance(files, list) or not files:
-            raise ValueError("proposal contains no file changes")
-        if len(files) > self.MAX_FILES:
-            raise ValueError(f"too many files: {len(files)} > {self.MAX_FILES}")
-
-        normalized = []
-        seen = set()
-        for item in files:
+    def _validate_paths(self, changes, untracked=None):
+        """Validate proposed paths while preserving the public test API."""
+        if not isinstance(changes, list) or not changes:
+            raise ValueError("model proposed no file changes")
+        if len(changes) > self.MAX_FILES:
+            raise ValueError(f"proposal exceeds {self.MAX_FILES} files")
+        untracked = {self._normalize(path) for path in (untracked or set())}
+        normalized, seen = [], set()
+        for item in changes:
             if not isinstance(item, dict):
-                raise ValueError("file entry must be an object")
+                raise ValueError("invalid model file change")
             relative = self._normalize(item.get("path", ""))
             content = item.get("content")
             if not relative or not isinstance(content, str):
                 raise ValueError("invalid model file change")
             if relative in seen:
-                raise ValueError(f"duplicate file: {relative}")
+                raise ValueError(f"duplicate file in proposal: {relative}")
             if self._protected(relative) or ".." in Path(relative).parts:
                 raise ValueError(f"protected or invalid path: {relative}")
             if len(content.encode("utf-8")) > self.MAX_FILE_BYTES:
                 raise ValueError(f"file too large: {relative}")
+            if relative in untracked:
+                raise ValueError(f"proposal would overwrite untracked file: {relative}")
             self._safe_path(relative)
             seen.add(relative)
             normalized.append((relative, content))
@@ -290,56 +275,27 @@ Current candidate files:
 
         proposal = self._initial_proposal(goal, self._snapshot())
         last_error = None
-
         for attempt in range(self.MAX_REPAIR_ATTEMPTS + 1):
             changed_paths = []
             backup_dir = None
             try:
-                normalized = self._validate_paths(proposal)
+                normalized = self._validate_paths(proposal.get("files", []), set())
                 changed_paths = [relative for relative, _ in normalized]
                 backup_dir = self._backup(changed_paths, before_contents)
-
                 for relative, content in normalized:
                     path = self._safe_path(relative)
                     path.parent.mkdir(parents=True, exist_ok=True)
                     temporary = path.with_name(f".{path.name}.evolution.tmp")
                     temporary.write_text(content, encoding="utf-8")
                     os.replace(temporary, path)
-
                 validation = self._validate()
                 if validation["ok"]:
-                    return {
-                        "ok": True,
-                        "stage": "applied",
-                        "attempt": attempt + 1,
-                        "summary": proposal.get("summary", ""),
-                        "changed_paths": changed_paths,
-                        "backup": backup_dir,
-                        "tests": "passed",
-                        "git": False,
-                    }
-
+                    return {"ok": True, "stage": "applied", "attempt": attempt + 1, "summary": proposal.get("summary", ""), "changed_paths": changed_paths, "backup": backup_dir, "tests": "passed", "git": False}
                 last_error = validation
                 self._rollback(changed_paths, before_contents)
                 if attempt >= self.MAX_REPAIR_ATTEMPTS:
-                    return {
-                        "ok": False,
-                        "stage": "rolled_back",
-                        "attempts": attempt + 1,
-                        "error": "validation failed after repair attempts",
-                        "validation": validation["output"][-20000:],
-                        "changed_paths": changed_paths,
-                        "backup": backup_dir,
-                        "git": False,
-                    }
-
-                proposal = self._repair_proposal(
-                    goal,
-                    proposal,
-                    {relative: content for relative, content in normalized},
-                    validation["output"],
-                )
-
+                    return {"ok": False, "stage": "rolled_back", "attempts": attempt + 1, "error": "validation failed after repair attempts", "validation": validation["output"][-20000:], "changed_paths": changed_paths, "backup": backup_dir, "git": False}
+                proposal = self._repair_proposal(goal, proposal, {relative: content for relative, content in normalized}, validation["output"])
             except Exception as exc:
                 if changed_paths:
                     self._rollback(changed_paths, before_contents)
