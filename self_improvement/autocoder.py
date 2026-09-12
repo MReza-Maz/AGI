@@ -79,8 +79,19 @@ class AutonomousCoder:
 
     @classmethod
     def _protected(cls, path):
-        normalized = path.replace("\\", "/").lstrip("./")
-        return normalized.startswith(cls.PROTECTED_PREFIXES)
+        """Return True when a path belongs to a protected repository area."""
+        normalized = str(path).replace("\\", "/")
+        while normalized.startswith("./"):
+            normalized = normalized[2:]
+        normalized = normalized.lstrip("/")
+
+        for protected in cls.PROTECTED_PREFIXES:
+            if protected.endswith("/"):
+                if normalized == protected[:-1] or normalized.startswith(protected):
+                    return True
+            elif normalized == protected:
+                return True
+        return False
 
     def _ask_model(self, instruction):
         payload = json.dumps(
