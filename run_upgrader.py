@@ -2,8 +2,10 @@
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
+import urllib.request
 from pathlib import Path
 
 from evolution.lifecycle import start_primary
@@ -32,6 +34,37 @@ def wait_for_process_exit(pid, timeout=30):
     raise RuntimeError(f"primary process {pid} did not stop within {timeout} seconds")
 
 
+def wait_for_health(url, timeout=30):
+    """Wait for the restarted primary HTTP endpoint to become healthy."""
+    deadline = time.time() + float(timeout)
+    last_error = "health check not completed"
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(url, timeout=2) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+                if response.status == 200 and payload.get("ok") is True:
+                    return payload
+                last_error = f"unexpected health response: {payload}"
+        except Exception as exc:
+            last_error = str(exc)
+        time.sleep(0.5)
+    raise RuntimeError(f"primary health check failed: {last_error}")
+
+
+def git_revert(repo, revision):
+    """Revert a committed upgrade without rewriting repository history."""
+    result = subprocess.run(
+        ["git", "revert", "--no-edit", revision],
+        cwd=repo,
+        text=True,
+        capture_output=True,
+        timeout=120,
+    )
+    if result.returncode:
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "git revert failed")
+    return result.stdout.strip()
+
+
 def main():
     parser = argparse.ArgumentParser(description="AGI independent self-upgrader")
     parser.add_argument("--repo", default="/opt/AGI")
@@ -42,6 +75,8 @@ def main():
     parser.add_argument("--model", default=None)
     parser.add_argument("--model-timeout", type=int, default=300)
     parser.add_argument("--push", action="store_true")
+    parser.add_argument("--health-url", default="http://127.0.0.1:8080/health")
+    parser.add_argument("--health-timeout", type=int, default=30)
     args = parser.parse_args()
 
     result = {
@@ -68,14 +103,37 @@ def main():
         result = coder.improve(args.prompt)
         result["prompt"] = args.prompt
         result["primary"] = args.primary
-        result["finished_at"] = time.time()
         write_status(args.repo, result)
 
-        # Start the primary only after syntax checks, tests, and commit have succeeded.
-        # On failure, AutonomousCoder rolls the proposed changes back first; restarting
-        # the unchanged primary keeps the service available.
+        if not result.get("ok"):
+            start_primary(args.repo, args.primary)
+            return 2
+
+        revision = result.get("commit")
+        result["stage"] = "restarting"
+        write_status(args.repo, result)
         start_primary(args.repo, args.primary)
-        return 0 if result.get("ok") else 2
+
+        try:
+            health = wait_for_health(args.health_url, args.health_timeout)
+            result["health"] = health
+            result["stage"] = "verified"
+            result["finished_at"] = time.time()
+            write_status(args.repo, result)
+            return 0
+        except Exception as health_error:
+            result["stage"] = "rollback"
+            result["health_error"] = str(health_error)
+            write_status(args.repo, result)
+            if not revision:
+                raise
+            git_revert(args.repo, revision)
+            result["rollback"] = "reverted"
+            result["stage"] = "rollback-complete"
+            write_status(args.repo, result)
+            start_primary(args.repo, args.primary)
+            return 3
+
     except Exception as exc:
         result = {
             "ok": False,
