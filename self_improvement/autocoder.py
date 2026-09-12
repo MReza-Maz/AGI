@@ -6,7 +6,9 @@ protected because it must remain independent from the code it upgrades.
 """
 import json
 import os
+import shutil
 import subprocess
+import time
 import urllib.request
 from pathlib import Path
 
@@ -22,11 +24,13 @@ class AutonomousCoder:
         "evolution/",
         "run_upgrader.py",
     )
+    MAX_FILES = 8
+    MAX_FILE_BYTES = 200_000
 
     def __init__(self, repo_path="/opt/AGI", model_url=None, model=None, timeout=180, auto_push=None):
         self.repo = Path(repo_path).resolve()
         self.model_url = model_url or os.environ.get("AGI_MODEL_URL", "http://127.0.0.1:11434/api/generate")
-        self.model = model or os.environ.get("AGI_MODEL", "qwen2.5-coder:7b")
+        self.model = model or os.environ.get("AGI_MODEL", "qwen3:4b")
         self.timeout = int(timeout)
         if auto_push is None:
             auto_push = os.environ.get("AGI_AUTO_PUSH", "0").lower() in {"1", "true", "yes", "on"}
@@ -49,7 +53,7 @@ class AutonomousCoder:
             if relative.endswith((".py", ".json", ".md")) and not self._protected(relative):
                 path = self.repo / relative
                 if path.is_file():
-                    files[relative] = path.read_text(encoding="utf-8")[:30000]
+                    files[relative] = path.read_text(encoding="utf-8")[:30_000]
         return files
 
     @classmethod
@@ -98,15 +102,34 @@ Repository snapshot:
         text = data.get("response", data.get("message", {}).get("content", ""))
         if not text:
             raise RuntimeError("coding model returned an empty response")
-        return json.loads(text)
+        proposal = json.loads(text)
+        if not isinstance(proposal, dict):
+            raise RuntimeError("coding model returned an invalid proposal")
+        return proposal
 
-    def _rollback(self, changed_paths, before):
-        tracked = [path for path in changed_paths if path in before]
-        created = [path for path in changed_paths if path not in before]
-        if tracked:
-            self._run("git", "restore", "--worktree", "--", *tracked)
-        if created:
-            self._run("git", "clean", "-f", "--", *created)
+    def _backup(self, changed_paths, before_contents):
+        """Create a local rollback copy before modifying tracked files."""
+        backup_dir = self.repo / "data" / "evolution_backups" / time.strftime("%Y%m%d-%H%M%S")
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        for relative in changed_paths:
+            if relative in before_contents:
+                target = backup_dir / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(before_contents[relative], encoding="utf-8")
+        return str(backup_dir)
+
+    def _rollback(self, changed_paths, before_contents):
+        """Restore tracked files from memory and remove only files created by the proposal."""
+        for relative in changed_paths:
+            path = self.repo / relative
+            if relative in before_contents:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(before_contents[relative], encoding="utf-8")
+            elif path.exists():
+                if path.is_file() or path.is_symlink():
+                    path.unlink()
+                elif path.is_dir():
+                    shutil.rmtree(path)
 
     def _push(self):
         result = self._run("git", "push", "origin", "main")
@@ -117,36 +140,73 @@ Repository snapshot:
     def improve(self, prompt):
         if not self.repo.is_dir() or not (self.repo / ".git").exists():
             raise RuntimeError(f"AGI repository not found: {self.repo}")
+
         status = self._run("git", "status", "--porcelain")
         if status.returncode:
             raise RuntimeError(status.stderr.strip() or "git status failed")
-        if status.stdout.strip():
-            raise RuntimeError("repository has uncommitted changes; clean the worktree before self-improvement")
 
-        before = set(self._files())
+        # Existing uncommitted tracked changes are never touched. Untracked runtime
+        # artifacts such as checkpoints and training data are allowed, but a proposal
+        # may not overwrite an existing untracked path.
+        tracked_dirty = []
+        untracked = set()
+        for line in status.stdout.splitlines():
+            if not line:
+                continue
+            code = line[:2]
+            path = line[3:]
+            if code == "??":
+                untracked.add(path.replace("\\", "/"))
+            else:
+                tracked_dirty.append(path)
+        if tracked_dirty:
+            raise RuntimeError("repository has uncommitted tracked changes; clean the worktree before self-improvement")
+
+        before_files = set(self._files())
+        before_contents = {}
+        for relative in before_files:
+            path = self.repo / relative
+            if path.is_file() and not self._protected(relative):
+                before_contents[relative] = path.read_text(encoding="utf-8")
+
         proposal = self._ask_model(prompt, self._snapshot())
         changes = proposal.get("files", [])
         if not isinstance(changes, list) or not changes:
             return {"ok": False, "stage": "proposal", "error": "model proposed no file changes"}
+        if len(changes) > self.MAX_FILES:
+            return {"ok": False, "stage": "proposal", "error": f"proposal exceeds {self.MAX_FILES} files"}
 
         changed_paths = []
+        seen = set()
         try:
             for item in changes:
+                if not isinstance(item, dict):
+                    raise ValueError("invalid model file change")
                 relative = str(item.get("path", "")).replace("\\", "/").lstrip("/")
                 content = item.get("content")
                 if not relative or not isinstance(content, str):
                     raise ValueError("invalid model file change")
                 if self._protected(relative) or ".." in Path(relative).parts:
                     raise ValueError(f"protected or invalid path: {relative}")
+                if relative in seen:
+                    raise ValueError(f"duplicate file in proposal: {relative}")
+                if len(content.encode("utf-8")) > self.MAX_FILE_BYTES:
+                    raise ValueError(f"file too large: {relative}")
+                if relative in untracked and relative not in before_files:
+                    raise ValueError(f"proposal would overwrite untracked file: {relative}")
+                seen.add(relative)
+                changed_paths.append(relative)
+
+            backup_dir = self._backup(changed_paths, before_contents)
+            for relative in changed_paths:
                 path = self.repo / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(content, encoding="utf-8")
-                changed_paths.append(relative)
+                path.write_text(next(item["content"] for item in changes if str(item["path"]).replace("\\", "/").lstrip("/") == relative), encoding="utf-8")
 
             syntax = self._run("python3", "-m", "compileall", "-q", ".")
             tests = self._run("python3", "-m", "unittest", "discover", "-s", "tests", "-v")
             if syntax.returncode or tests.returncode:
-                self._rollback(changed_paths, before)
+                self._rollback(changed_paths, before_contents)
                 return {
                     "ok": False,
                     "stage": "validation",
@@ -154,12 +214,13 @@ Repository snapshot:
                     "syntax": syntax.stderr or syntax.stdout,
                     "tests": tests.stderr or tests.stdout,
                     "changed_paths": changed_paths,
+                    "backup": backup_dir,
                 }
 
             message = "autonomous improvement: " + str(proposal.get("summary", "update AGI"))[:80]
-            commit = self._run("git", "add", "--", *changed_paths)
-            if commit.returncode:
-                raise RuntimeError(commit.stderr.strip() or "git add failed")
+            add = self._run("git", "add", "--", *changed_paths)
+            if add.returncode:
+                raise RuntimeError(add.stderr.strip() or "git add failed")
             commit = self._run("git", "commit", "-m", message)
             if commit.returncode:
                 raise RuntimeError(commit.stderr.strip() or "git commit failed")
@@ -171,6 +232,7 @@ Repository snapshot:
                 "changed_paths": changed_paths,
                 "commit": revision.stdout.strip(),
                 "tests": "passed",
+                "backup": backup_dir,
                 "pushed": False,
             }
             if self.auto_push:
@@ -179,7 +241,6 @@ Repository snapshot:
                 result["stage"] = "pushed"
             return result
         except Exception:
-            current = self._run("git", "status", "--porcelain")
-            if current.returncode == 0 and any(line.endswith(tuple(changed_paths)) for line in current.stdout.splitlines()):
-                self._rollback(changed_paths, before)
+            self._rollback(changed_paths, before_contents)
+            self._run("git", "reset", "--", *changed_paths)
             raise
