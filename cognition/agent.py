@@ -11,6 +11,7 @@ from dataclasses import asdict
 
 from cognition.goals import Goal, GoalManager
 from cognition.world_model import WorldState
+from memory.episodic import EpisodicMemory
 from memory.manager import MemoryManager
 from reasoning.engine import ReasoningEngine
 from self_improvement.controller import SelfImprovementController
@@ -27,6 +28,10 @@ class CognitiveAgent:
         self.memory = MemoryManager(memory_cfg.get("working_capacity", 32))
         self.memory.semantic.path = memory_cfg.get("semantic_path", "data/semantic.json")
         self.memory.semantic._load()
+        self.episodic = EpisodicMemory(
+            memory_cfg.get("episodic_path", "data/episodes.json"),
+            memory_cfg.get("episodic_capacity", 10000),
+        )
         self.reasoning = ReasoningEngine()
         self.goals = GoalManager()
         self.world = WorldState()
@@ -61,6 +66,9 @@ class CognitiveAgent:
     def recall(self, query, k=5):
         return self.memory.semantic.search(self._embedding(query), k=int(k))
 
+    def recall_episodes(self, query, k=5):
+        return self.episodic.search(query, limit=k)
+
     def _context(self, observation, memories, goal):
         parts = ["Observation: " + str(observation)]
         if goal:
@@ -68,6 +76,11 @@ class CognitiveAgent:
         if memories:
             parts.append("Relevant memory:")
             parts.extend("- " + item["text"] for item in memories)
+        episodes = self.recall_episodes(observation, k=3)
+        if episodes:
+            parts.append("Relevant past experiences:")
+            parts.extend("- " + json.dumps(item, ensure_ascii=False) for item in episodes)
+        parts.append("World state: " + json.dumps(self.world.snapshot(), ensure_ascii=False))
         return "\n".join(parts)
 
     def think(self, observation, k=5):
@@ -79,6 +92,7 @@ class CognitiveAgent:
             "observation": observation, "memory_count": len(memories), "turn": self.turn,
         })
         result = {"turn": self.turn, "observation": observation, "memories": memories,
+                  "episodes": self.recall_episodes(observation, k=3),
                   "goal": asdict(goal) if goal else None, "reasoning": reasoning,
                   "context": self._context(observation, memories, goal)}
         if self.inference is not None:
@@ -123,6 +137,15 @@ class CognitiveAgent:
         reflection = self.reasoning.reflection.evaluate(goal_text, outcome)
         self.world.set("last_confidence", reflection.get("confidence", 0.0))
         self.goals.refresh(self.world)
+        self.episodic.record(
+            goal=goal_text,
+            observation=result.get("observation"),
+            action=result.get("reasoning", {}).get("plan"),
+            outcome=outcome,
+            reflection=reflection,
+            success=reflection.get("confidence", 0.0) >= 0.8,
+            metadata={"turn": self.turn, "plan_revision": self.world.get("plan_revision", 0)},
+        )
         return reflection
 
     def run_cycle(self, observation, action_callback=None):
@@ -138,7 +161,9 @@ class CognitiveAgent:
     def snapshot(self):
         return {"turn": self.turn, "world": self.world.snapshot(),
                 "goals": [asdict(goal) for goal in self.goals.goals],
-                "history_size": len(self.history), "tools": self.tools.describe()}
+                "history_size": len(self.history),
+                "episodic_memory_size": len(self.episodic.episodes),
+                "tools": self.tools.describe()}
 
     def save_state(self, path="data/agent_state.json"):
         directory = os.path.dirname(path)
