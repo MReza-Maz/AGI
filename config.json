@@ -1,9 +1,10 @@
 {
   "model": "qwen3:4b",
   "ollama_url": "http://127.0.0.1:11434/api/generate",
-  "model_timeout": 120,
-  "test_timeout": 10,
-  "activation_timeout": 10,
-  "benchmark_runs": 3,
+  "model_timeout": 600,
+  "model_max_tokens": 2048,
+  "test_timeout": 15,
+  "activation_timeout": 15,
+  "benchmark_runs": 5,
   "iteration_delay": 1
 }
