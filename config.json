@@ -1,45 +1,9 @@
 {
-  "project": "AGI",
-  "version": "0.5.0",
-  "seed": 42,
-  "brain": {
-    "input_size": 16,
-    "hidden_size": 32,
-    "output_size": 16,
-    "layers": 2,
-    "attention_heads": 4,
-    "causal_attention": true
-  },
-  "llm": {
-    "provider": "ollama",
-    "model": "qwen3:30b",
-    "endpoint": "http://127.0.0.1:11434/api/chat",
-    "timeout": 120,
-    "temperature": 0.2,
-    "structured_reasoning": true
-  },
-  "memory": {
-    "working_capacity": 32,
-    "semantic_path": "data/semantic.json",
-    "episodic_path": "data/episodes.jsonl"
-  },
-  "security": {
-    "require_human_approval": true,
-    "allow_agent_deploy": false,
-    "max_candidate_files": 8
-  },
-  "browser": {
-    "enabled": true,
-    "backend": "http",
-    "timeout": 15,
-    "max_steps": 20,
-    "max_response_bytes": 2000000
-  },
-  "training": {
-    "optimizer": "adam",
-    "learning_rate": 0.001,
-    "weight_decay": 0.0,
-    "gradient_clip_norm": 1.0,
-    "epochs": 10
-  }
+  "model": "qwen3:4b",
+  "ollama_url": "http://127.0.0.1:11434/api/generate",
+  "model_timeout": 120,
+  "test_timeout": 10,
+  "activation_timeout": 10,
+  "benchmark_runs": 3,
+  "iteration_delay": 1
 }

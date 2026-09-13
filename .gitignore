@@ -1,8 +1,0 @@
-__pycache__/
-*.py[codz]
-.venv/
-venv/
-.env
-data/*.jsonl
-data/*.json
-.DS_Store

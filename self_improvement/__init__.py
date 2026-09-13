@@ -1,1 +1,0 @@
-"""Controlled self-improvement pipeline."""
